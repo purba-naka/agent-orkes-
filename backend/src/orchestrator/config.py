@@ -16,18 +16,15 @@ class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
 
+    # Required. No defaults: secrets must never live in source.
     # Async SQLAlchemy uses postgresql+psycopg
-    database_url: str = (
-        "postgresql+psycopg://orchestrator:orchestrator_dev_password@127.0.0.1:5433/orchestrator_dev"
-    )
+    database_url: str
 
     # LangGraph PostgresSaver uses raw postgresql:// URI
-    checkpointer_url: str = (
-        "postgresql://orchestrator:orchestrator_dev_password@127.0.0.1:5433/orchestrator_dev"
-    )
+    checkpointer_url: str
 
-    # 32 bytes base64-encoded AES-256 master key for dev
-    app_encryption_key: str = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+    # 32 bytes base64-encoded AES-256 master key
+    app_encryption_key: str
 
     cors_origins: list[str] = [
         "http://127.0.0.1:5173",
@@ -44,13 +41,8 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Dev defaults above are public (see docker-compose.yml). Refuse to boot with them
-# outside development so prod never silently encrypts credentials with a repo key.
-if settings.environment != "development":
-    if settings.app_encryption_key == Settings.model_fields["app_encryption_key"].default:
-        raise RuntimeError("APP_ENCRYPTION_KEY must be set outside development")
-    if "orchestrator_dev_password" in settings.database_url:
-        raise RuntimeError("DATABASE_URL must be set outside development")
+if len(base64.b64decode(settings.app_encryption_key)) != 32:
+    raise RuntimeError("APP_ENCRYPTION_KEY must decode to exactly 32 bytes")
 
 # Ensure Windows uses SelectorEventLoop for psycopg compatibility
 if sys.platform == "win32":

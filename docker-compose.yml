@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: orchestrator
-      POSTGRES_PASSWORD: orchestrator_dev_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: orchestrator_dev
     ports:
       - "127.0.0.1:5433:5432"

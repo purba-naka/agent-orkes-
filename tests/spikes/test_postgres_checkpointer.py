@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import os
 import uuid
 
 import pytest
@@ -8,7 +9,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-DB_URI = "postgresql://orchestrator:orchestrator_dev_password@127.0.0.1:5433/orchestrator_dev"
+DB_URI = os.environ["CHECKPOINTER_URL"]
 
 
 @pytest.mark.asyncio
