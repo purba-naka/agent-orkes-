@@ -54,6 +54,11 @@ class McpRemoteTool(BaseModel):
     output_schema: dict | None = None
 
 
+class McpEnabledTool(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    approval: Literal["always", "never"] = "never"
+
+
 class McpSnapshotTool(BaseModel):
     name: str
     title: str | None = None
@@ -94,6 +99,7 @@ class McpConnectionResponse(BaseModel):
     expires_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    enabled_tools: list[McpEnabledTool] = Field(default_factory=list)
     latest_snapshot: McpSnapshotSummary | None = None
 
 
@@ -255,6 +261,24 @@ async def list_remote_tools(
         )
         for tool in tools
     ]
+
+
+@router.put("/{connection_id}/enabled-tools", response_model=McpConnectionResponse)
+async def set_enabled_tools(
+    connection_id: uuid.UUID,
+    payload: list[McpEnabledTool],
+    session: AsyncSession = Depends(get_db_session),
+) -> McpConnectionResponse:
+    connection = await session.get(McpConnection, connection_id)
+    if not connection:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    names = [tool.name for tool in payload]
+    if len(names) != len(set(names)):
+        raise HTTPException(status_code=422, detail="Duplicate tool names")
+    connection.enabled_tools = [tool.model_dump() for tool in payload]
+    await session.commit()
+    await session.refresh(connection)
+    return McpConnectionResponse.model_validate(connection)
 
 
 @router.get("/{connection_id}/snapshot", response_model=McpToolSnapshotResponse)

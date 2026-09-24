@@ -110,7 +110,11 @@ function EditorShellInner({
     (source: string, target: string) => {
       if (!doc) return
       const edges = doc.edges || []
-      handleDocChange({ ...doc, edges: [...edges, { kind: 'direct', source, target }] })
+      // Exit nodes are rendered as `__exit_<result_name>` (lib/edges.ts).
+      const edge = target.startsWith('__exit_')
+        ? { kind: 'exit', source, result_name: target.slice('__exit_'.length) }
+        : { kind: 'direct', source, target }
+      handleDocChange({ ...doc, edges: [...edges, edge] })
       dispatch({ type: 'selectEdge', edgeIndex: edges.length })
     },
     [doc, handleDocChange, dispatch]

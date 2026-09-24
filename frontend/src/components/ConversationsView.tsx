@@ -1,18 +1,48 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowUp, Bot, RefreshCw, ShieldAlert } from 'lucide-react'
 import type { AgentItem, ConversationDetail, RunInterrupt } from '../api'
 import { api } from '../api'
+import { AssistantParts, buildTurns } from './ChatMessage'
+
+/** A message as it arrives over SSE (see backend runtime/sse.py). */
+interface LiveMessage {
+  id: string
+  type: string
+  content: any
+  tool_calls?: { id: string; name: string; args: unknown }[]
+  tool_call_id?: string | null
+  status?: string | null
+  reasoning?: string | null
+}
+
+/** Live SSE messages -> the persisted content-block shape buildTurns reads. */
+function liveToBlocks(msg: LiveMessage): any[] {
+  if (msg.type === 'tool') {
+    const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+    return [{ type: 'tool_result', tool_call_id: msg.tool_call_id, status: msg.status, content }]
+  }
+  const blocks: any[] = []
+  if (msg.reasoning) blocks.push({ type: 'reasoning', reasoning: msg.reasoning })
+  if (typeof msg.content === 'string') blocks.push({ type: 'text', text: msg.content })
+  else if (Array.isArray(msg.content)) blocks.push(...msg.content)
+  for (const call of msg.tool_calls || []) {
+    if (call?.name) blocks.push({ type: 'tool_call', id: call.id, name: call.name, args: call.args })
+  }
+  return blocks
+}
 
 interface ConversationsViewProps {
   selectedConversationId: string | null
   onSelectConversation: (id: string) => void
   onConversationsChanged: () => void
+  onOpenAgents: () => void
 }
 
 export function ConversationsView({
   selectedConversationId,
   onSelectConversation,
   onConversationsChanged,
+  onOpenAgents,
 }: ConversationsViewProps) {
   const [agents, setAgents] = useState<AgentItem[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -36,7 +66,9 @@ export function ConversationsView({
   // Chat message input & streaming
   const [inputText, setInputText] = useState('')
   const [streaming, setStreaming] = useState(false)
-  const [streamContent, setStreamContent] = useState('')
+  const [liveMessages, setLiveMessages] = useState<LiveMessage[]>([])
+  // Shown immediately on send, before the server has projected it.
+  const [pendingUserText, setPendingUserText] = useState<string | null>(null)
   const [pendingRunId, setPendingRunId] = useState<string | null>(null)
   const [pendingInterrupt, setPendingInterrupt] = useState<RunInterrupt | null>(null)
 
@@ -68,12 +100,10 @@ export function ConversationsView({
     async function loadDetail() {
       if (!selectedConversationId) {
         setActiveConv(null)
-        setStreamContent('')
         return
       }
       try {
         setDetailLoading(true)
-        setStreamContent('')
         const detail = await api.getConversation(selectedConversationId)
         if (!cancelled) setActiveConv(detail)
       } catch (err: any) {
@@ -94,7 +124,16 @@ export function ConversationsView({
     if (thread) {
       thread.scrollTop = thread.scrollHeight
     }
-  }, [activeConv?.messages, streamContent, pendingInterrupt])
+  }, [activeConv?.messages, liveMessages, pendingUserText, pendingInterrupt])
+
+  const turns = useMemo(() => buildTurns(activeConv?.messages || []), [activeConv?.messages])
+  const liveParts = useMemo(
+    () =>
+      buildTurns(
+        liveMessages.map((m) => ({ id: m.id, role: m.type === 'tool' ? 'tool' : 'assistant', content: liveToBlocks(m), created_at: '' }))
+      )[0]?.parts || [],
+    [liveMessages]
+  )
 
   // Auto-grow composer textarea
   useEffect(() => {
@@ -145,37 +184,53 @@ export function ConversationsView({
     await streamMessage(selectedConversationId, userText)
   }
 
+  /** Insert or update a live message by id; token chunks append to it. */
+  function upsertLive(msg: LiveMessage) {
+    if (!msg?.id || (msg.type !== 'ai' && msg.type !== 'AIMessageChunk' && msg.type !== 'tool')) return
+    setLiveMessages((prev) => {
+      const i = prev.findIndex((m) => m.id === msg.id)
+      if (i < 0) return [...prev, msg]
+      const next = [...prev]
+      const old = prev[i]
+      next[i] =
+        msg.type === 'AIMessageChunk' && typeof old.content === 'string' && typeof msg.content === 'string'
+          ? {
+              ...old,
+              content: old.content + msg.content,
+              reasoning: (old.reasoning || '') + (msg.reasoning || '') || null,
+              tool_calls: msg.tool_calls?.length ? msg.tool_calls : old.tool_calls,
+            }
+          : msg
+      return next
+    })
+  }
+
   async function streamMessage(conversationId: string, userText: string) {
     setStreaming(true)
-    setStreamContent('')
+    setLiveMessages([])
+    setPendingUserText(userText)
 
     try {
-      let accumulated = ''
       await api.sendConversationMessageStream(
         conversationId,
         userText,
         (event, data) => {
           if (event === 'native' && data?.chunk) {
-            // Check for chunk text or message chunk
             const payload = data.chunk
             if (data.mode === 'messages') {
-              const msg = Array.isArray(payload) ? payload[0] : payload
-              if (msg?.content && typeof msg.content === 'string') {
-                accumulated = msg.content
-                setStreamContent(accumulated)
-              }
-            } else if (data.mode === 'updates' && payload?.model?.messages) {
-              const msgs = payload.model.messages
-              const last = msgs[msgs.length - 1]
-              if (last?.content && typeof last.content === 'string') {
-                accumulated = last.content
-                setStreamContent(accumulated)
+              upsertLive(Array.isArray(payload) ? payload[0] : payload)
+            } else if (data.mode === 'updates' && data.namespace?.length && payload && typeof payload === 'object') {
+              // Agent subgraph node updates carry final ai/tool messages
+              // (complete tool_calls); outer graph updates never do.
+              for (const update of Object.values(payload) as any[]) {
+                for (const msg of update?.messages || []) upsertLive(msg)
               }
             }
           } else if (event === 'open') {
             setPendingRunId(data.run_id)
+          } else if (event === 'error') {
+            setError(data?.message || 'Run failed')
           } else if (event === 'close') {
-            if (data?.output?.content) setStreamContent(data.output.content)
             if (data.status === 'interrupted') {
               setPendingRunId((currentRunId) => {
                 if (currentRunId) {
@@ -190,13 +245,15 @@ export function ConversationsView({
         }
       )
     } catch (err: any) {
-      alert(`Failed to send message: ${err.message}`)
+      setError(`Failed to send message: ${err.message}`)
     } finally {
-      setStreaming(false)
-      setStreamContent('')
-      // Refresh projected messages and the sidebar history entry
+      // Load the projected messages first, then drop the live view, so the
+      // thread never flashes empty between the two.
       onConversationsChanged()
       await reloadConversation(conversationId)
+      setStreaming(false)
+      setLiveMessages([])
+      setPendingUserText(null)
     }
   }
 
@@ -222,7 +279,6 @@ export function ConversationsView({
         (event, data) => {
           if (event === 'close' && data.status !== 'interrupted') {
             setPendingInterrupt(null)
-            if (data.output?.content) setStreamContent(data.output.content)
           }
         }
       )
@@ -263,17 +319,6 @@ export function ConversationsView({
     }
   }
 
-  function renderMessageContent(content: any) {
-    if (typeof content === 'string') return content
-    if (Array.isArray(content)) {
-      return content.map((part, idx) => {
-        if (typeof part === 'string') return <span key={idx}>{part}</span>
-        if (part?.type === 'text') return <span key={idx}>{part.text}</span>
-        return <pre key={idx}>{JSON.stringify(part, null, 2)}</pre>
-      })
-    }
-    return <pre>{JSON.stringify(content, null, 2)}</pre>
-  }
 
   return (
     <div className="chat-layout">
@@ -285,9 +330,14 @@ export function ConversationsView({
           <div className="chat-empty chat-empty-start">
             <h2>What can your agents help with?</h2>
             {agents.length === 0 ? (
-              <p className="subtext">
-                No published agents yet. Publish a revision in the Agents tab to start chatting.
-              </p>
+              <>
+                <p className="subtext">
+                  No published agents yet. Publish a revision in the Agents tab to start chatting.
+                </p>
+                <button type="button" className="btn btn-primary" onClick={onOpenAgents}>
+                  Open Agents
+                </button>
+              </>
             ) : (
               <div className="composer composer-static">
                 <form className="composer-form" onSubmit={handleStartConversation}>
@@ -459,10 +509,10 @@ export function ConversationsView({
                 </div>
               )}
 
-              {activeConv.messages.map((m) => {
-                const isUser = m.role === 'user'
+              {turns.map((t) => {
+                const isUser = t.role === 'user'
                 return (
-                  <div key={m.id} className={`chat-message ${isUser ? 'user' : 'assistant'}`}>
+                  <div key={t.id} className={`chat-message ${isUser ? 'user' : 'assistant'}`}>
                     {!isUser && (
                       <div className="message-avatar" aria-hidden="true">
                         <Bot />
@@ -471,13 +521,27 @@ export function ConversationsView({
                     <div className="message-block">
                       <div className="message-meta">
                         <strong>{isUser ? 'You' : 'Assistant'}</strong>
-                        <span>{new Date(m.created_at).toLocaleTimeString()}</span>
+                        <span>{new Date(t.createdAt).toLocaleTimeString()}</span>
                       </div>
-                      <div className="message-body">{renderMessageContent(m.content)}</div>
+                      <div className="message-body">
+                        {isUser ? t.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('') : <AssistantParts parts={t.parts} />}
+                      </div>
                     </div>
                   </div>
                 )
               })}
+
+              {pendingUserText !== null && (
+                <div className="chat-message user">
+                  <div className="message-block">
+                    <div className="message-meta">
+                      <strong>You</strong>
+                      <span>sending…</span>
+                    </div>
+                    <div className="message-body">{pendingUserText}</div>
+                  </div>
+                </div>
+              )}
 
               {/* Streaming assistant message */}
               {streaming && (
@@ -488,15 +552,12 @@ export function ConversationsView({
                   <div className="message-block">
                     <div className="message-meta">
                       <strong>Assistant</strong>
-                      <span>streaming…</span>
+                      <span>working…</span>
                     </div>
-                    <div className="message-body">
-                      {streamContent ? (
-                        <>
-                          {streamContent}
-                          <span className="streaming-caret" aria-hidden="true" />
-                        </>
-                      ) : (
+                    <div className="message-body" aria-live="polite">
+                      <AssistantParts parts={liveParts} live />
+                      {/* Dots while the model is between steps (no text yet or a tool just returned). */}
+                      {!liveParts.some((p) => p.kind === 'text' && p.text.trim()) && (
                         <span className="thinking-indicator" aria-label="Assistant is thinking">
                           <span />
                           <span />

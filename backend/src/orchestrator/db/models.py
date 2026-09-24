@@ -67,6 +67,11 @@ class McpConnection(Base):
     args: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     env_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     env_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    # Tools chosen on the MCP page: [{name, approval}]. Agents that attach this
+    # connection without their own list inherit it; publish freezes a copy.
+    enabled_tools: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
     # pending -> connected; any refresh failure -> needs_reauth
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     # OAuth-only fields; null for auth=none and stdio connections.

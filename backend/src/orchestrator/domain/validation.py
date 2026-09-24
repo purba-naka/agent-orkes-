@@ -191,6 +191,9 @@ def _validate_mcp_bindings(agent_cfg: dict[str, Any], path: str) -> list[Diagnos
                     severity="error",
                 )
             )
+        # No `tools` key: inherit the connection's enabled_tools at publish.
+        if "tools" not in binding:
+            continue
         tools = binding.get("tools")
         if not isinstance(tools, list) or not tools:
             diagnostics.append(
@@ -1033,7 +1036,17 @@ async def validate_publish_document(
                     snapshot_names = {
                         tool.get("name") for tool in snapshot.tools if isinstance(tool, dict)
                     }
-                    for t_idx, bound_tool in enumerate(binding.get("tools", [])):
+                    bound_tools = binding["tools"] if "tools" in binding else connection.enabled_tools
+                    if not bound_tools:
+                        diagnostics.append(
+                            Diagnostic(
+                                code="publish.mcp_no_tools_enabled",
+                                path=binding_path,
+                                message=f"MCP connection '{connection.name}' has no tools enabled; select them on the MCP page",
+                                severity="error",
+                            )
+                        )
+                    for t_idx, bound_tool in enumerate(bound_tools):
                         if not isinstance(bound_tool, dict):
                             continue
                         name = bound_tool.get("name")

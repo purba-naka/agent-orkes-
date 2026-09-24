@@ -97,6 +97,10 @@ async def freeze_mcp_bindings(
                     )
                 pinned = str(snapshot.id)
             binding["snapshot_id"] = pinned
+            if "tools" not in binding:
+                # Freeze the connection's MCP-page selection into the revision.
+                connection = await session.get(McpConnection, uuid.UUID(connection_id))
+                binding["tools"] = copy.deepcopy(connection.enabled_tools) if connection else []
     return resolved
 
 

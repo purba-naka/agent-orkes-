@@ -399,6 +399,9 @@ async def resolve_mcp_bound_tools(
                 _output_schema: dict[str, Any] | None = entry.get("output_schema"),
                 **kwargs: Any,
             ) -> Any:
+                # The args model defaults optional fields to None; an omitted
+                # field must stay omitted, not become null for the MCP server.
+                kwargs = {k: v for k, v in kwargs.items() if v is not None}
                 validate_schema(_input_schema, kwargs, "tool_input_invalid")
                 async with async_session_factory() as tool_session:
                     current = await tool_session.get(

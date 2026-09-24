@@ -52,11 +52,31 @@ def parse_checkpoint_message(m: BaseMessage) -> tuple[str, str, Any]:
         role = "user" if getattr(m, "type", "") == "user" else "assistant"
 
     if isinstance(m.content, str):
-        content = [{"type": "text", "text": m.content}]
+        content = [{"type": "text", "text": m.content}] if m.content else []
     elif isinstance(m.content, list):
-        content = m.content
+        content = list(m.content)
     else:
         content = [{"type": "text", "text": str(m.content)}]
+
+    # Keep what the chat UI needs to show the agent's steps: reasoning, the
+    # tool calls it made, and which call a tool result answers.
+    reasoning = (getattr(m, "additional_kwargs", None) or {}).get("reasoning_content")
+    if reasoning:
+        content.insert(0, {"type": "reasoning", "reasoning": str(reasoning)})
+    for call in getattr(m, "tool_calls", None) or []:
+        content.append(
+            {"type": "tool_call", "id": call.get("id"), "name": call.get("name"), "args": call.get("args", {})}
+        )
+    if role == "tool":
+        content = [
+            {
+                "type": "tool_result",
+                "tool_call_id": getattr(m, "tool_call_id", None),
+                "name": getattr(m, "name", None),
+                "status": getattr(m, "status", "success"),
+                "content": m.content if isinstance(m.content, str) else str(m.content),
+            }
+        ]
 
     return msg_id, role, content
 

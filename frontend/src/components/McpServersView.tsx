@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { McpAuthMode, McpConnection, McpRemoteTool, McpTransport } from '../api'
+import type { McpAuthMode, McpConnection, McpEnabledTool, McpRemoteTool, McpTransport } from '../api'
 import { api } from '../api'
 
 interface ConnectionTools {
@@ -33,6 +33,12 @@ function parseEnv(value: string): Record<string, string> {
     env[key] = val
   }
   return env
+}
+
+// MCP descriptions can be several paragraphs; the list shows the first sentence.
+function firstSentence(text: string): string {
+  const line = text.trim().split(/\r?\n/)[0]
+  return line.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? line
 }
 
 function connectionTarget(connection: McpConnection): string {
@@ -154,8 +160,9 @@ export function McpServersView() {
     }
     if (connection.status !== 'connected') return
     setToolsByConnection((prev) => ({ ...prev, [connection.id]: { tools: [], error: null, loading: true } }))
-    api.listMcpTools(connection.id)
-      .then((tools) => {
+    // Refresh the snapshot so the selectable list is exactly what publish validates.
+    api.getMcpSnapshot(connection.id, true)
+      .then(({ tools }) => {
         setToolsByConnection((prev) => ({ ...prev, [connection.id]: { tools, error: null, loading: false } }))
       })
       .catch((listError) => {
@@ -164,6 +171,15 @@ export function McpServersView() {
           [connection.id]: { tools: [], error: listError instanceof Error ? listError.message : 'Failed to list tools', loading: false },
         }))
       })
+  }
+
+  async function saveEnabledTools(connection: McpConnection, tools: McpEnabledTool[]) {
+    try {
+      const updated = await api.setMcpEnabledTools(connection.id, tools)
+      setConnections((prev) => prev.map((c) => (c.id === updated.id ? { ...c, enabled_tools: updated.enabled_tools } : c)))
+    } catch (saveError) {
+      setFormError(saveError instanceof Error ? saveError.message : 'Failed to save enabled tools')
+    }
   }
 
   return (
@@ -257,6 +273,7 @@ export function McpServersView() {
                   <div className="tool-row-main">
                     <div className="tool-title-line">
                       <h4>{connection.name}</h4>
+                      <span className="risk-badge risk-low">{(connection.enabled_tools || []).length} tools enabled</span>
                       <span className={`risk-badge risk-${connection.status === 'connected' ? 'low' : 'high'}`}>{connection.status}</span>
                       <span className="risk-badge risk-low">{TRANSPORT_LABELS[connection.transport] || connection.transport}</span>
                     </div>
@@ -269,11 +286,59 @@ export function McpServersView() {
                       ) : connectionTools.tools.length === 0 ? (
                         <p className="hint">This server exposes no tools.</p>
                       ) : (
-                        <div className="tool-metadata">
-                          {connectionTools.tools.map((tool) => (
-                            <span key={tool.name} title={tool.description || undefined}>{tool.title || tool.name}</span>
-                          ))}
-                        </div>
+                        (() => {
+                          const enabled = connection.enabled_tools || []
+                          const allOn = connectionTools.tools.every((tool) => enabled.some((t) => t.name === tool.name))
+                          const someOn = enabled.length > 0 && !allOn
+                          return (
+                            <div className="mcp-tool-picker">
+                              <p className="hint">Checked tools are available to every agent that attaches this server. Changes apply on the agent's next publish.</p>
+                              <label className="checkbox-field mcp-tool-select-all">
+                                <input
+                                  type="checkbox"
+                                  checked={allOn}
+                                  ref={(el) => { if (el) el.indeterminate = someOn }}
+                                  // Keeps approval settings of tools that were already enabled.
+                                  onChange={(e) => saveEnabledTools(connection, e.target.checked
+                                    ? connectionTools.tools.map((tool) => enabled.find((t) => t.name === tool.name) || { name: tool.name, approval: 'never' as const })
+                                    : [])}
+                                />
+                                <span>Select all <small>{enabled.length} of {connectionTools.tools.length} enabled</small></span>
+                              </label>
+                              <div className="checkbox-list mcp-tool-list">
+                                {connectionTools.tools.map((tool) => {
+                                  const entry = enabled.find((t) => t.name === tool.name)
+                                  const others = enabled.filter((t) => t.name !== tool.name)
+                                  return (
+                                    <div key={tool.name} className="mcp-tool-row">
+                                      <label className="checkbox-field">
+                                        <input
+                                          type="checkbox"
+                                          checked={!!entry}
+                                          onChange={(e) => saveEnabledTools(connection, e.target.checked ? [...others, { name: tool.name, approval: 'never' }] : others)}
+                                        />
+                                        <span>
+                                          {tool.title || tool.name}
+                                          {tool.description && <small className="mcp-tool-desc" title={tool.description}>{firstSentence(tool.description)}</small>}
+                                        </span>
+                                      </label>
+                                      {entry && (
+                                        <label className="mcp-tool-approval">
+                                          <input
+                                            type="checkbox"
+                                            checked={entry.approval === 'always'}
+                                            onChange={(e) => saveEnabledTools(connection, [...others, { name: tool.name, approval: e.target.checked ? 'always' : 'never' }])}
+                                          />
+                                          Require approval
+                                        </label>
+                                      )}
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )
+                        })()
                       )
                     ) : null}
                   </div>

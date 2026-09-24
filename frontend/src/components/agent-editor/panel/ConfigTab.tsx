@@ -14,11 +14,12 @@
 //                       tool_selection, model_call_limit, tool_call_limit, model_retry
 // ---------------------------------------------------------------------------
 
-import { createContext, useContext, useMemo, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ChevronDown, Cpu, Database, Flag, Gauge, PenLine, ScrollText, Trash2, Wrench, X } from 'lucide-react'
+import { ChevronDown, Cpu, Database, Flag, Gauge, PenLine, Plug, ScrollText, Trash2, Wrench, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import type { ModelItem, ToolItem } from '../../../api'
+import { api } from '../../../api'
+import type { McpConnection, ModelItem, ToolItem } from '../../../api'
 import { parseFieldPathMapping } from './EdgeEditor'
 
 type SummarizationUnit = 'fraction' | 'tokens'
@@ -384,6 +385,55 @@ function CapabilitiesSection() {
               ))}
             </div>
           )}
+        </div>
+      )}
+    </Section>
+  )
+}
+
+// Attach whole servers. The binding omits `tools`, so publish freezes the
+// server's MCP-page selection (enabled_tools) into the revision.
+function McpSection() {
+  const { node, updateNode } = useConfig()
+  const [connections, setConnections] = useState<McpConnection[]>([])
+
+  useEffect(() => {
+    api.listMcpConnections().then(setConnections).catch(() => setConnections([]))
+  }, [])
+
+  if (node.kind === 'tool') return null
+  const bindings: { connection_id: string }[] = node.agent?.mcp_bindings || []
+  const attachedIds = bindings.map((b) => b.connection_id)
+
+  function toggle(connectionId: string, checked: boolean) {
+    const next = checked
+      ? [...bindings, { connection_id: connectionId }]
+      : bindings.filter((b) => b.connection_id !== connectionId)
+    updateNode({ agent: { ...node.agent, mcp_bindings: next } })
+  }
+
+  return (
+    <Section icon={Plug} title="MCP" meta={attachedIds.length > 0 ? `${attachedIds.length} servers` : undefined}>
+      <p className="hint">Attach MCP servers. Choose which tools each server exposes in the MCP tab.</p>
+      {connections.length === 0 ? (
+        <p className="hint">No MCP servers registered yet.</p>
+      ) : (
+        <div className="checkbox-list ai-upstream-list">
+          {connections.map((connection) => (
+            <label className="checkbox-field" key={connection.id}>
+              <input
+                type="checkbox"
+                checked={attachedIds.includes(connection.id)}
+                onChange={(e) => toggle(connection.id, e.target.checked)}
+              />
+              <span>
+                {connection.name}
+                <small>
+                  {connection.status} · {(connection.enabled_tools || []).length} tools enabled
+                </small>
+              </span>
+            </label>
+          ))}
         </div>
       )}
     </Section>
@@ -849,6 +899,7 @@ export function ConfigTab({
             <PromptSection />
             <ModelSection />
             <CapabilitiesSection />
+            <McpSection />
             <MappingSection />
             <LimitsSection />
             <ContextSection />

@@ -109,7 +109,13 @@ export interface McpConnection {
   expires_at: string | null
   created_at: string
   updated_at: string
+  enabled_tools: McpEnabledTool[]
   latest_snapshot?: McpSnapshotSummary | null
+}
+
+export interface McpEnabledTool {
+  name: string
+  approval: 'always' | 'never'
 }
 
 export interface McpConnectionCreate {
@@ -128,6 +134,11 @@ export interface McpRemoteTool {
   description: string | null
   input_schema: Record<string, any>
   output_schema: Record<string, any> | null
+}
+
+export interface McpSnapshot extends McpSnapshotSummary {
+  connection_id: string
+  tools: (McpRemoteTool & { annotations?: Record<string, any> | null })[]
 }
 
 export interface McpAuthorization {
@@ -469,6 +480,28 @@ export const api = {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
       throw new Error(err.detail || 'Failed to list MCP tools')
+    }
+    return res.json()
+  },
+
+  async getMcpSnapshot(id: string, refresh = false): Promise<McpSnapshot> {
+    const res = await fetch(`/api/v1/mcp-connections/${id}/snapshot`, { method: refresh ? 'POST' : 'GET' })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail || 'Failed to load MCP snapshot')
+    }
+    return res.json()
+  },
+
+  async setMcpEnabledTools(id: string, tools: McpEnabledTool[]): Promise<McpConnection> {
+    const res = await fetch(`/api/v1/mcp-connections/${id}/enabled-tools`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(tools),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail || 'Failed to save enabled tools')
     }
     return res.json()
   },

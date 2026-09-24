@@ -16,6 +16,9 @@ def serialize_native(obj: Any) -> Any:
             "content": serialize_native(obj.content),
             "name": getattr(obj, "name", None),
             "tool_calls": serialize_native(getattr(obj, "tool_calls", [])),
+            "tool_call_id": getattr(obj, "tool_call_id", None),
+            "status": getattr(obj, "status", None),
+            "reasoning": (getattr(obj, "additional_kwargs", None) or {}).get("reasoning_content"),
             "id": getattr(obj, "id", None),
             "response_metadata": serialize_native(getattr(obj, "response_metadata", {})),
         }

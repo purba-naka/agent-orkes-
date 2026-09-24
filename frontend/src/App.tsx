@@ -324,12 +324,13 @@ export function App() {
           </header>
         )}
 
-        <main className={`content ${isEditingAgent ? 'content--bleed' : ''}`}>
+        <main className={`content ${isEditingAgent ? 'content--bleed' : ''} ${activeTab === 'conversations' ? 'content--chat' : ''}`}>
           {activeTab === 'conversations' ? (
             <ConversationsView
               selectedConversationId={selectedConversationId}
               onSelectConversation={openConversation}
               onConversationsChanged={loadConversations}
+              onOpenAgents={() => selectTab('agents')}
             />
           ) : activeTab === 'agents' ? (
             <AgentsView

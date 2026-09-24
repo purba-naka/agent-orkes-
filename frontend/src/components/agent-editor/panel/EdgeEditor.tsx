@@ -232,7 +232,8 @@ export function EdgeEditor({ document, edgeIndex, onChange, onDelete }: EdgeEdit
               onChange={(e) => patchEdge({ target: e.target.value })}
             >
               <option value="">-- Select node --</option>
-              {nodeIds.map((id) => <option key={id} value={id}>{id}</option>)}
+              {/* Self-loops are invisible on the canvas and fail publish. */}
+              {nodeIds.filter((id) => id !== sourceNodeId).map((id) => <option key={id} value={id}>{id}</option>)}
             </select>
           </div>
         </>

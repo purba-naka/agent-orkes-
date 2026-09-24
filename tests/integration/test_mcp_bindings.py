@@ -55,8 +55,10 @@ async def _connected_connection(client, fake) -> tuple[str, str]:
     return body["connection"]["id"], name
 
 
-async def _draft_with_bindings(client, connection_id: str, tools: list[dict]) -> tuple[str, dict]:
-    """Create an agent whose inline node binds `tools` from the connection."""
+async def _draft_with_bindings(
+    client, connection_id: str, tools: list[dict] | None
+) -> tuple[str, dict]:
+    """Create an agent whose inline node binds `tools` (None: inherit) from the connection."""
     model = await client.post(
         "/api/v1/models",
         json={
@@ -78,9 +80,10 @@ async def _draft_with_bindings(client, connection_id: str, tools: list[dict]) ->
     agent_id = agent.json()["id"]
     draft = (await client.get(f"/api/v1/agents/{agent_id}/draft")).json()
     doc = draft["document"]
-    doc["nodes"][0]["agent"]["mcp_bindings"] = [
-        {"connection_id": connection_id, "tools": tools}
-    ]
+    binding = {"connection_id": connection_id}
+    if tools is not None:
+        binding["tools"] = tools
+    doc["nodes"][0]["agent"]["mcp_bindings"] = [binding]
     save = await client.put(
         f"/api/v1/agents/{agent_id}/draft",
         json={"version": draft["version"], "document": doc},
@@ -141,6 +144,35 @@ async def test_publish_freezes_snapshot_and_tracks_dependencies(provider) -> Non
         republished = await client.post(f"/api/v1/agents/{agent_id}/publish")
         assert republished.json()["id"] != rev["id"]
         assert _binding(republished.json()["document"])["snapshot_id"] == new_snap["id"]
+
+        await client.delete(f"/api/v1/mcp-connections/{connection_id}")
+
+
+@pytest.mark.asyncio
+async def test_attached_server_inherits_mcp_page_selection(provider) -> None:
+    fake, _ = provider
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        connection_id, _ = await _connected_connection(client, fake)
+        assert (await client.post(f"/api/v1/mcp-connections/{connection_id}/snapshot")).status_code == 200
+        agent_id, saved = await _draft_with_bindings(client, connection_id, None)
+        assert saved["validation"] == []
+
+        # Nothing selected on the MCP page yet: publish refuses.
+        empty = await client.post(f"/api/v1/agents/{agent_id}/publish")
+        assert empty.status_code == 422
+        codes = [d["code"] for d in empty.json()["detail"]["diagnostics"]]
+        assert "publish.mcp_no_tools_enabled" in codes
+
+        selection = [{"name": "search", "approval": "always"}]
+        put = await client.put(
+            f"/api/v1/mcp-connections/{connection_id}/enabled-tools", json=selection
+        )
+        assert put.status_code == 200, put.text
+        assert put.json()["enabled_tools"] == selection
+
+        pub = await client.post(f"/api/v1/agents/{agent_id}/publish")
+        assert pub.status_code == 200, pub.text
+        assert _binding(pub.json()["document"])["tools"] == selection
 
         await client.delete(f"/api/v1/mcp-connections/{connection_id}")
 
@@ -241,6 +273,8 @@ async def test_runtime_resolves_and_invokes_bound_tools(provider) -> None:
         fake.mcp_methods.clear()
         assert await tools[0].ainvoke({"q": "x"}) == {"pages": 3}
         assert fake.mcp_methods == ["initialize", "notifications/initialized", "tools/call"]
+        # Omitted optional args must not be sent as null (fails schema validation).
+        assert await tools[0].ainvoke({}) == {"pages": 3}
 
         # Connection flipped to needs_reauth after resolve: invoke fails cleanly.
         stored = await session.get(McpConnection, uuid.UUID(connection_id))
