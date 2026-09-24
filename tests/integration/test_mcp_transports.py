@@ -1,6 +1,8 @@
-"""MCP connections beyond OAuth: no-auth streamable HTTP and stdio (sse
-follows in a later slice) — all registered through the same mcp-connections API."""
+"""MCP connections beyond OAuth: no-auth streamable HTTP, stdio, and legacy
+HTTP+SSE — all registered through the same mcp-connections API."""
 
+import asyncio
+import json
 import sys
 import uuid
 
@@ -19,6 +21,9 @@ from orchestrator.tools.mcp_stdio import stdio_manager
 from test_mcp_oauth import MCP_URL, FakeProvider, public
 
 FRONTEND = "http://127.0.0.1:5173"
+
+SSE_URL = "https://sse.fake.test/sse"
+SSE_MESSAGE_URL = "https://sse.fake.test/sse-message"
 
 # A minimal line-delimited JSON-RPC MCP server, usable as:
 #   python -c STDIO_SERVER_SCRIPT
@@ -220,6 +225,132 @@ async def test_stdio_command_allowlist_gates_creation() -> None:
         )
         assert denied.status_code == 403
         assert "allowlist" in denied.json()["detail"]
+
+
+class FakeSseServer:
+    """Legacy SSE MCP server: GET stream + 202-only POST message endpoint,
+    with responses pushed onto the stream as `message` events."""
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.requests: list[dict] = []
+
+    async def handler(self, request: httpx.Request) -> httpx.Response:
+        url = str(request.url).split("?")[0]
+        if request.method == "GET" and url == SSE_URL:
+            async def stream():
+                yield b"event: endpoint\ndata: /sse-message\n\n"
+                while True:
+                    chunk = await self.queue.get()
+                    if chunk is None:
+                        return
+                    yield chunk
+
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, content=stream()
+            )
+        if request.method == "POST" and url == SSE_MESSAGE_URL:
+            message = json.loads(request.read())
+            self.requests.append(message)
+            if "id" not in message:
+                return httpx.Response(202)
+            method = message.get("method")
+            if method == "initialize":
+                result = {"protocolVersion": "2025-03-26", "capabilities": {}}
+            elif method == "tools/list":
+                result = {"tools": [{"name": "search", "inputSchema": {"type": "object"}}]}
+            elif method == "tools/call":
+                result = {"structuredContent": {"pages": 3}}
+            else:
+                result = {}
+            event = json.dumps(
+                {"jsonrpc": "2.0", "id": message["id"], "result": result}
+            )
+            self.queue.put_nowait(f"event: message\ndata: {event}\n\n".encode())
+            return httpx.Response(202)
+        return httpx.Response(404)
+
+
+@pytest.fixture
+def sse_server():
+    fake = FakeSseServer()
+    transport = httpx.MockTransport(fake.handler)
+    app.dependency_overrides[mcp_connections._service] = lambda: McpOAuthService(
+        NetworkPolicy(resolver=public), transport
+    )
+    yield fake, transport
+    fake.queue.put_nowait(None)  # release the suspended GET stream
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_sse_connection_end_to_end(sse_server) -> None:
+    fake, transport = sse_server
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/api/v1/mcp-connections",
+            headers={"origin": FRONTEND},
+            json={
+                "name": f"legacy-{uuid.uuid4().hex[:8]}",
+                "transport": "sse",
+                "auth": "none",
+                "server_url": SSE_URL,
+            },
+        )
+        assert created.status_code == 201, created.text
+        body = created.json()
+        assert body["connection"]["status"] == "connected"
+        assert body["connection"]["transport"] == "sse"
+        connection_id = body["connection"]["id"]
+
+        remote = await client.get(f"/api/v1/mcp-connections/{connection_id}/tools")
+        assert remote.status_code == 200, remote.text
+        assert [t["name"] for t in remote.json()] == ["search"]
+
+        snapshot = await client.post(f"/api/v1/mcp-connections/{connection_id}/snapshot")
+        assert snapshot.status_code == 200, snapshot.text
+        assert [t["name"] for t in snapshot.json()["tools"]] == ["search"]
+
+        await client.delete(f"/api/v1/mcp-connections/{connection_id}")
+
+    methods = [message.get("method") for message in fake.requests]
+    assert methods == ["initialize", "notifications/initialized", "tools/list"] * 2
+
+
+@pytest.mark.asyncio
+async def test_sse_tool_invocation(sse_server) -> None:
+    from orchestrator.db.session import async_session_factory
+    from orchestrator.tools.adapters import ToolInvoker
+    from orchestrator.tools.mcp_config import connection_rpc_config
+
+    fake, transport = sse_server
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/api/v1/mcp-connections",
+            headers={"origin": FRONTEND},
+            json={
+                "name": f"legacy-{uuid.uuid4().hex[:8]}",
+                "transport": "sse",
+                "auth": "none",
+                "server_url": SSE_URL,
+            },
+        )
+        assert created.status_code == 201, created.text
+        connection_id = created.json()["connection"]["id"]
+
+    try:
+        async with async_session_factory() as session:
+            connection = await session.get(McpConnection, uuid.UUID(connection_id))
+            invoker = ToolInvoker(
+                session, network_policy=NetworkPolicy(resolver=public), transport=transport
+            )
+            result = await invoker.invoke_mcp_tool(
+                connection_rpc_config(connection), "search", {}
+            )
+            assert result == {"pages": 3}
+    finally:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            await client.delete(f"/api/v1/mcp-connections/{connection_id}")
 
 
 @pytest.mark.asyncio

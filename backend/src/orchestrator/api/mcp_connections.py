@@ -125,9 +125,10 @@ async def create_connection(
     service: McpOAuthService = Depends(_service),
 ) -> McpAuthorization:
     origin = _browser_origin(request)
-    if payload.transport == "sse":
+    if payload.transport == "sse" and payload.auth != "none":
         raise HTTPException(
-            status_code=422, detail="Transport 'sse' is not supported yet"
+            status_code=422,
+            detail="OAuth requires the streamable_http transport; use auth=none for sse",
         )
     if payload.transport == "stdio" and payload.command not in settings.mcp_stdio_command_allowlist:
         raise HTTPException(

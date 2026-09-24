@@ -20,6 +20,22 @@ _TEMPLATE_FIELD = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
+async def _sse_events(response: httpx.Response):
+    """Yield (event, data) pairs from an SSE stream, one per blank-line block."""
+    event_type: str | None = None
+    data_lines: list[str] = []
+    async for line in response.aiter_lines():
+        if not line:
+            if data_lines:
+                yield event_type or "message", "\n".join(data_lines)
+            event_type, data_lines = None, []
+            continue
+        if line.startswith("event:"):
+            event_type = line[len("event:"):].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[len("data:"):].removeprefix(" "))
+
+
 def parse_jsonrpc_response(response: httpx.Response, request_id: int) -> dict[str, Any]:
     """Streamable HTTP servers answer with plain JSON or an SSE stream."""
     if not response.headers.get("content-type", "").startswith("text/event-stream"):
@@ -325,6 +341,22 @@ class ToolInvoker:
                 return tools
         raise ToolInvocationError("mcp_protocol_error", "MCP tools/list did not terminate")
 
+    async def _mcp_auth_headers(
+        self, config: dict[str, Any], headers: dict[str, str]
+    ) -> dict[str, str]:
+        """OAuth bearer for connections that carry credentials; auth=none skips."""
+        # ponytail: auth=none skips the token fetch entirely; the connection
+        # never had OAuth credentials to present.
+        if config.get("connection_id") and config.get("auth", "oauth") != "none":
+            try:
+                token = await McpOAuthService(
+                    self.network_policy, self.transport
+                ).access_token(self.session, uuid.UUID(str(config["connection_id"])))
+            except (McpOAuthError, ValueError) as exc:
+                raise ToolInvocationError("mcp_auth_required", str(exc)) from exc
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
     async def _mcp_rpc(
         self,
         config: dict[str, Any],
@@ -332,13 +364,16 @@ class ToolInvoker:
         calls: list[tuple[str, dict[str, Any]]],
     ) -> list[dict[str, Any]]:
         """Route an MCP session to the connection's transport."""
-        if str(config.get("transport", "streamable_http")) == "stdio":
+        transport = str(config.get("transport", "streamable_http"))
+        if transport == "stdio":
             try:
                 return await stdio_manager.call(
                     config, calls, timeout=float(config.get("timeout_seconds", 30))
                 )
             except StdioMcpError as exc:
                 raise ToolInvocationError(exc.code, str(exc)) from exc
+        if transport == "sse":
+            return await self._mcp_rpc_sse(config, headers, calls)
         return await self._mcp_rpc_streamable_http(config, headers, calls)
 
     async def _mcp_rpc_streamable_http(
@@ -351,16 +386,7 @@ class ToolInvoker:
         headers.setdefault("Accept", "application/json, text/event-stream")
         server_url = str(config["server_url"])
         timeout = float(config.get("timeout_seconds", 30))
-        # ponytail: auth=none skips the token fetch entirely; the connection
-        # never had OAuth credentials to present.
-        if config.get("connection_id") and config.get("auth", "oauth") != "none":
-            try:
-                token = await McpOAuthService(
-                    self.network_policy, self.transport
-                ).access_token(self.session, uuid.UUID(str(config["connection_id"])))
-            except (McpOAuthError, ValueError) as exc:
-                raise ToolInvocationError("mcp_auth_required", str(exc)) from exc
-            headers["Authorization"] = f"Bearer {token}"
+        headers = await self._mcp_auth_headers(config, headers)
         redirect_options = {
             "timeout": timeout,
             "follow_redirects": bool(config.get("follow_redirects", False)),
@@ -427,6 +453,122 @@ class ToolInvoker:
         except ToolInvocationError:
             raise
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            raise ToolInvocationError("tool_network_error", "MCP request failed") from exc
+        except (httpx.HTTPStatusError, json.JSONDecodeError) as exc:
+            raise ToolInvocationError("mcp_protocol_error", "MCP server returned an invalid response") from exc
+
+    async def _mcp_rpc_sse(
+        self,
+        config: dict[str, Any],
+        headers: dict[str, str],
+        calls: list[tuple[str, dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        """Legacy HTTP+SSE transport (pre-streamable-http protocol).
+
+        One GET stream per operation: the server announces a POST endpoint via
+        an `endpoint` event, messages are POSTed there (answered with 202 and
+        no body), and JSON-RPC responses arrive as `message` events on the
+        stream, matched by id.
+        """
+        server_url = str(config["server_url"])
+        timeout = float(config.get("timeout_seconds", 30))
+        headers = await self._mcp_auth_headers(config, dict(headers))
+        headers.setdefault("Accept", "text/event-stream")
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=False,
+                trust_env=False,
+                transport=self.transport,
+            ) as client:
+                await self.network_policy.validate_url(server_url)
+                async with client.stream("GET", server_url, headers=headers) as stream:
+                    if stream.status_code == 401:
+                        raise ToolInvocationError(
+                            "mcp_auth_required", "MCP server rejected the credentials"
+                        )
+                    stream.raise_for_status()
+                    events = _sse_events(stream)
+                    try:
+                        endpoint_url: str | None = None
+                        async for event_type, data in events:
+                            if event_type == "endpoint":
+                                endpoint_url = urljoin(server_url, data.strip())
+                                break
+                        if endpoint_url is None:
+                            raise ToolInvocationError(
+                                "mcp_protocol_error",
+                                "MCP SSE stream did not provide a message endpoint",
+                            )
+
+                        async def _post(message: dict[str, Any]) -> None:
+                            # ponytail: the endpoint URL comes from the stream and
+                            # still crosses the SSRF policy before every POST.
+                            await self.network_policy.validate_url(endpoint_url)
+                            response = await client.post(
+                                endpoint_url, headers=headers, json=message
+                            )
+                            response.raise_for_status()
+
+                        await _post(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": "initialize",
+                                "params": {
+                                    "protocolVersion": str(
+                                        config.get("protocol_version", "2025-03-26")
+                                    ),
+                                    "capabilities": {},
+                                    "clientInfo": {
+                                        "name": "agent-orchestrator",
+                                        "version": "1",
+                                    },
+                                },
+                            }
+                        )
+                        await _post(
+                            {"jsonrpc": "2.0", "method": "notifications/initialized"}
+                        )
+                        expected = {1}
+                        for request_id, (method, params) in enumerate(calls, start=2):
+                            expected.add(request_id)
+                            await _post(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": request_id,
+                                    "method": method,
+                                    "params": params,
+                                }
+                            )
+
+                        answers: dict[int, dict[str, Any]] = {}
+                        async for event_type, data in events:
+                            if event_type != "message":
+                                continue
+                            try:
+                                payload = json.loads(data)
+                            except json.JSONDecodeError:
+                                continue
+                            request_id = payload.get("id")
+                            if request_id in expected:
+                                answers[request_id] = payload
+                            if len(answers) == len(expected):
+                                break
+                    finally:
+                        await events.aclose()
+                missing = expected - set(answers)
+                if missing:
+                    raise ToolInvocationError(
+                        "mcp_protocol_error",
+                        "MCP SSE stream closed before all responses arrived",
+                    )
+                if "error" in answers[1]:
+                    raise ToolInvocationError("mcp_protocol_error", "MCP initialize failed")
+                return [answers[request_id] for request_id in range(2, len(calls) + 2)]
+        except ToolInvocationError:
+            raise
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.StreamError) as exc:
             raise ToolInvocationError("tool_network_error", "MCP request failed") from exc
         except (httpx.HTTPStatusError, json.JSONDecodeError) as exc:
             raise ToolInvocationError("mcp_protocol_error", "MCP server returned an invalid response") from exc
