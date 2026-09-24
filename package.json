@@ -1,0 +1,19 @@
+{
+  "name": "agent-orchestrator-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev:backend": ".venv/Scripts/python backend/src/orchestrator/main.py",
+    "dev:frontend": "bun --cwd=frontend run dev",
+    "dev": "concurrently -k -p \"[{name}]\" -n \"backend,frontend\" -c \"cyan,magenta\" \"bun run dev:backend\" \"bun run dev:frontend\"",
+    "test:backend": "uv run pytest tests/ -v",
+    "test:frontend": "bun --cwd=frontend run test",
+    "test": "bun run test:backend",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:migrate": "uv run alembic upgrade head"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

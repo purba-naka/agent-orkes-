@@ -1,0 +1,200 @@
+/* ============================================================
+   Agent Orchestrator — Design Tokens (Tailwind v4 CSS-first)
+   Source of truth: /design.md ("Warm Intelligence")
+   ============================================================ */
+
+/* Self-hosted fonts (Fontsource) — no external requests */
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/source-serif-4';
+@import '@fontsource-variable/jetbrains-mono';
+@import 'tailwindcss';
+
+/* Class-based dark mode */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* ---------- Type ---------- */
+  --font-sans: 'Inter Variable', system-ui, 'Segoe UI', Roboto, sans-serif;
+  --font-serif: 'Source Serif 4 Variable', 'Georgia', serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, Consolas, monospace;
+
+  --text-display: 30px;
+  --text-display--line-height: 1.2;
+  --text-title: 20px;
+  --text-title--line-height: 1.3;
+  --text-body: 15px;
+  --text-body--line-height: 1.6;
+  --text-body-lg: 16px;
+  --text-body-lg--line-height: 1.65;
+  --text-secondary: 13.5px;
+  --text-secondary--line-height: 1.5;
+  --text-caption: 12px;
+  --text-caption--line-height: 1.4;
+  --text-code: 13px;
+  --text-code--line-height: 1.6;
+
+  /* ---------- Spacing (4pt scale) ---------- */
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-5: 20px;
+  --spacing-6: 24px;
+  --spacing-8: 32px;
+  --spacing-10: 40px;
+  --spacing-12: 48px;
+  --spacing-16: 64px;
+
+  /* ---------- Radius ---------- */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* ---------- Color: Light "Ivory" (default) ---------- */
+  --color-bg: oklch(97.6% 0.006 85);
+  --color-bg-sidebar: oklch(95.3% 0.008 85);
+  --color-bg-elevated: oklch(99% 0.003 85);
+  --color-bg-muted: oklch(94% 0.007 85);
+
+  --color-fg: oklch(24% 0.01 80);
+  --color-fg-muted: oklch(48% 0.012 80);
+  --color-fg-subtle: oklch(58% 0.01 80);
+
+  --color-accent: oklch(64% 0.115 45);
+  --color-accent-fg: oklch(99% 0.003 85);
+  --color-accent-muted: oklch(93% 0.03 50);
+
+  --color-success: oklch(58% 0.13 155);
+  --color-warning: oklch(70% 0.13 75);
+  --color-destructive: oklch(55% 0.19 27);
+
+  --color-border: oklch(89% 0.008 85);
+  --color-border-strong: oklch(82% 0.01 85);
+  --color-ring: oklch(64% 0.115 45);
+
+  /* Terminal stays dark in both modes */
+  --color-terminal: oklch(16% 0.005 80);
+  --color-terminal-fg: oklch(84% 0.006 85);
+
+  /* ---------- Elevation ---------- */
+  --shadow-sm: 0 1px 2px rgb(30 25 20 / 0.05);
+  --shadow-md: 0 2px 8px rgb(30 25 20 / 0.08);
+  --shadow-lg: 0 8px 24px rgb(30 25 20 / 0.14);
+
+  /* ---------- Motion ---------- */
+  --animate-fade-in: fade-in 0.2s ease-out;
+  --animate-rise-in: rise-in 0.2s ease-out;
+  --animate-caret-blink: caret-blink 1s step-end infinite;
+  --animate-dot-pulse: dot-pulse 1.2s ease-in-out infinite;
+  --animate-skeleton: skeleton 1.2s ease-in-out infinite;
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes rise-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes caret-blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+  @keyframes dot-pulse {
+    0%, 100% { opacity: 0.35; transform: scale(0.85); }
+    50% { opacity: 1; transform: scale(1); }
+  }
+  @keyframes skeleton {
+    0%, 100% { opacity: 0.45; }
+    50% { opacity: 0.85; }
+  }
+}
+
+/* ---------- Dark "Warm Charcoal" overrides ---------- */
+.dark {
+  --color-bg: oklch(20.5% 0.005 80);
+  --color-bg-sidebar: oklch(17.5% 0.005 80);
+  --color-bg-elevated: oklch(24% 0.006 80);
+  --color-bg-muted: oklch(27% 0.006 80);
+
+  --color-fg: oklch(93% 0.005 85);
+  --color-fg-muted: oklch(72% 0.008 80);
+  --color-fg-subtle: oklch(58% 0.008 80);
+
+  --color-accent: oklch(71% 0.105 45);
+  --color-accent-fg: oklch(20.5% 0.005 80);
+  --color-accent-muted: oklch(30% 0.04 45);
+
+  --color-success: oklch(70% 0.13 155);
+  --color-warning: oklch(76% 0.12 75);
+  --color-destructive: oklch(65% 0.17 27);
+
+  --color-border: oklch(29% 0.006 80);
+  --color-border-strong: oklch(38% 0.007 80);
+  --color-ring: oklch(71% 0.105 45);
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+  --shadow-md: 0 2px 8px rgb(0 0 0 / 0.35);
+  --shadow-lg: 0 8px 24px rgb(0 0 0 / 0.45);
+}
+
+/* ---------- Base ---------- */
+@layer base {
+  html {
+    font-size: 15px;
+  }
+
+  body {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: 1.6;
+    letter-spacing: 0.005em;
+    color: var(--color-fg);
+    background: var(--color-bg);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  #root {
+    min-height: 100svh;
+  }
+
+  h1, h2, h3, h4, h5 {
+    font-family: var(--font-sans);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--color-fg);
+    margin: 0;
+  }
+
+  h1 { font-size: 24px; line-height: 1.25; }
+  h2 { font-size: 19px; line-height: 1.3; }
+  h3 { font-size: 16px; line-height: 1.35; }
+  h4 { font-size: 14.5px; line-height: 1.4; }
+  h5 { font-size: 13px; line-height: 1.4; }
+
+  code, pre, kbd {
+    font-family: var(--font-mono);
+  }
+
+  ::selection {
+    background: var(--color-accent-muted);
+  }
+
+  *:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

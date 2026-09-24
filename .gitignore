@@ -1,0 +1,29 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Database & Environment
+.env
+.env.*
+!.env.example
+pgdata/
+
+# Logs & stray artifacts
+*.log
+NUL
+
+# IDE & OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
