@@ -153,6 +153,8 @@ class McpOAuthService:
         connection = McpConnection(
             id=uuid.uuid4(),
             name=name,
+            transport="streamable_http",
+            auth="oauth",
             server_url=server_url,
             status="pending",
             authorization_endpoint=str(auth["authorization_endpoint"]),

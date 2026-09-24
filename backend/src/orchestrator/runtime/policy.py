@@ -34,6 +34,7 @@ from orchestrator.tools.adapters import (
     ToolInvoker,
     validate_schema,
 )
+from orchestrator.tools.mcp_config import connection_rpc_config
 from orchestrator.tools.mcp_snapshots import mcp_bound_tool_name
 from orchestrator.tools.network import NetworkPolicy
 
@@ -377,10 +378,7 @@ async def resolve_mcp_bound_tools(
             for tool in snapshot.tools
             if isinstance(tool, dict) and tool.get("name")
         }
-        config = {
-            "server_url": connection.server_url,
-            "connection_id": str(connection.id),
-        }
+        config = connection_rpc_config(connection)
         for bound in binding.get("tools", []):
             if not isinstance(bound, dict):
                 continue

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from orchestrator.db.models import McpConnection, McpToolSnapshot
 from orchestrator.domain.canonical import compute_content_hash
 from orchestrator.tools.adapters import ToolInvoker, ToolInvocationError
+from orchestrator.tools.mcp_config import connection_rpc_config
 from orchestrator.tools.network import NetworkPolicy
 
 
@@ -121,9 +122,7 @@ class McpSnapshotService:
             network_policy=self.network_policy,
             transport=self.transport,
         )
-        raw_tools = await invoker.list_mcp_tools(
-            {"server_url": connection.server_url, "connection_id": str(connection.id)}
-        )
+        raw_tools = await invoker.list_mcp_tools(connection_rpc_config(connection))
         tools = [normalize_tool_entry(tool) for tool in raw_tools]
         tools_hash = snapshot_tools_hash(tools)
 

@@ -46,7 +46,9 @@ class Credential(Base):
 
 
 class McpConnection(Base):
-    """OAuth 2.1 link to one remote MCP server. Tokens are AES-GCM encrypted."""
+    """Link to one MCP server (streamable HTTP + OAuth by default, but also
+    no-auth HTTP, legacy HTTP+SSE, and local stdio servers). Secrets are
+    AES-GCM encrypted."""
 
     __tablename__ = "mcp_connections"
 
@@ -54,16 +56,27 @@ class McpConnection(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    server_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # Remote transports (streamable_http, sse) carry a server_url; stdio does not.
+    transport: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="streamable_http"
+    )
+    auth: Mapped[str] = mapped_column(String(16), nullable=False, default="oauth")
+    server_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # stdio only: the executable to spawn and its argv (env secrets are encrypted).
+    command: Mapped[str | None] = mapped_column(Text, nullable=True)
+    args: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    env_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    env_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     # pending -> connected; any refresh failure -> needs_reauth
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
-    authorization_endpoint: Mapped[str] = mapped_column(Text, nullable=False)
-    token_endpoint: Mapped[str] = mapped_column(Text, nullable=False)
-    client_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # OAuth-only fields; null for auth=none and stdio connections.
+    authorization_endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    client_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Registered with the client; OAuth requires the exact same value on every hop.
-    redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    redirect_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Frontend page the callback sends the browser back to.
-    return_url: Mapped[str] = mapped_column(Text, nullable=False)
+    return_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     scope: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Short-lived authorization state; cleared once the code is exchanged.
     oauth_state: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
@@ -80,6 +93,14 @@ class McpConnection(Base):
         CheckConstraint(
             "status IN ('pending', 'connected', 'needs_reauth')",
             name="ck_mcp_connection_status",
+        ),
+        CheckConstraint(
+            "transport IN ('streamable_http', 'sse', 'stdio')",
+            name="ck_mcp_connection_transport",
+        ),
+        CheckConstraint(
+            "auth IN ('oauth', 'none')",
+            name="ck_mcp_connection_auth",
         ),
     )
 

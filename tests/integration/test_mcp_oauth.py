@@ -28,6 +28,7 @@ class FakeProvider:
         self.issued = 0
         self.valid: set[str] = set()
         self.refresh_ok = True
+        self.require_auth = True
         self.token_forms: list[dict[str, str]] = []
         self.mcp_methods: list[str] = []
         self.tools_pages: list[dict] = [
@@ -45,7 +46,7 @@ class FakeProvider:
         url = str(request.url).split("?")[0]
         if url == MCP_URL:
             auth = request.headers.get("authorization", "")
-            if auth.removeprefix("Bearer ") not in self.valid:
+            if self.require_auth and auth.removeprefix("Bearer ") not in self.valid:
                 return httpx.Response(
                     401,
                     headers={

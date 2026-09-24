@@ -334,7 +334,9 @@ class ToolInvoker:
         headers.setdefault("Accept", "application/json, text/event-stream")
         server_url = str(config["server_url"])
         timeout = float(config.get("timeout_seconds", 30))
-        if config.get("connection_id"):
+        # ponytail: auth=none skips the token fetch entirely; the connection
+        # never had OAuth credentials to present.
+        if config.get("connection_id") and config.get("auth", "oauth") != "none":
             try:
                 token = await McpOAuthService(
                     self.network_policy, self.transport

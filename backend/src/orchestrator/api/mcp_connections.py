@@ -1,10 +1,11 @@
 from datetime import datetime
+from typing import Literal
 from urllib.parse import urlencode
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse, RedirectResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +14,7 @@ from orchestrator.config import settings
 from orchestrator.db.models import McpConnection, McpToolSnapshot
 from orchestrator.db.session import get_db_session
 from orchestrator.tools.adapters import ToolInvocationError, ToolInvoker
+from orchestrator.tools.mcp_config import connection_rpc_config, store_connection_env
 from orchestrator.tools.mcp_oauth import McpOAuthError, McpOAuthService
 from orchestrator.tools.mcp_snapshots import McpSnapshotService
 from orchestrator.tools.network import NetworkPolicyError
@@ -22,8 +24,25 @@ router = APIRouter(prefix="/api/v1/mcp-connections", tags=["mcp-connections"])
 
 class McpConnectionCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
-    server_url: str = Field(..., min_length=1, max_length=2048)
+    transport: Literal["streamable_http", "sse", "stdio"] = "streamable_http"
+    auth: Literal["oauth", "none"] = "oauth"
+    server_url: str | None = Field(default=None, min_length=1, max_length=2048)
     scope: str | None = Field(default=None, max_length=1024)
+    # stdio only: the executable to spawn, its argv, and its env (encrypted at rest).
+    command: str | None = Field(default=None, min_length=1, max_length=1024)
+    args: list[str] = Field(default_factory=list, max_length=64)
+    env: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> "McpConnectionCreate":
+        if self.transport == "stdio":
+            if not self.command:
+                raise ValueError("stdio transport requires a command")
+            if self.auth != "none":
+                raise ValueError("stdio transport does not use OAuth")
+        elif not self.server_url:
+            raise ValueError("remote transports require a server_url")
+        return self
 
 
 class McpRemoteTool(BaseModel):
@@ -64,7 +83,11 @@ class McpConnectionResponse(BaseModel):
 
     id: uuid.UUID
     name: str
-    server_url: str
+    transport: str
+    auth: str
+    server_url: str | None
+    command: str | None
+    args: list[str] | None
     status: str
     scope: str | None
     expires_at: datetime | None
@@ -75,7 +98,8 @@ class McpConnectionResponse(BaseModel):
 
 class McpAuthorization(BaseModel):
     connection: McpConnectionResponse
-    authorization_url: str
+    # Null for connections that skip the OAuth dance (no-auth, stdio).
+    authorization_url: str | None = None
 
 
 def _service() -> McpOAuthService:
@@ -100,11 +124,22 @@ async def create_connection(
     service: McpOAuthService = Depends(_service),
 ) -> McpAuthorization:
     origin = _browser_origin(request)
+    if payload.transport != "streamable_http":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Transport '{payload.transport}' is not supported yet",
+        )
     try:
+        if payload.auth == "none":
+            connection = await _create_direct(session, payload)
+            return McpAuthorization(
+                connection=McpConnectionResponse.model_validate(connection),
+                authorization_url=None,
+            )
         connection, url = await service.create(
             session,
             name=payload.name,
-            server_url=payload.server_url,
+            server_url=payload.server_url or "",
             origin=origin,
             scope=payload.scope,
         )
@@ -116,6 +151,31 @@ async def create_connection(
     return McpAuthorization(
         connection=McpConnectionResponse.model_validate(connection), authorization_url=url
     )
+
+
+async def _create_direct(
+    session: AsyncSession, payload: McpConnectionCreate
+) -> McpConnection:
+    """No-OAuth connection (no-auth HTTP or stdio): connected immediately."""
+    connection = McpConnection(
+        id=uuid.uuid4(),
+        name=payload.name,
+        transport=payload.transport,
+        auth=payload.auth,
+        server_url=payload.server_url,
+        command=payload.command,
+        args=list(payload.args) or None,
+        status="connected",
+    )
+    store_connection_env(connection, payload.env)
+    session.add(connection)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="Connection name already exists") from exc
+    await session.refresh(connection)
+    return connection
 
 
 @router.get("", response_model=list[McpConnectionResponse])
@@ -174,9 +234,7 @@ async def list_remote_tools(
         session, network_policy=service.network_policy, transport=service.transport
     )
     try:
-        tools = await invoker.list_mcp_tools(
-            {"server_url": connection.server_url, "connection_id": str(connection.id)}
-        )
+        tools = await invoker.list_mcp_tools(connection_rpc_config(connection))
     except (ToolInvocationError, NetworkPolicyError) as exc:
         code = 409 if getattr(exc, "code", "") == "mcp_auth_required" else 502
         raise HTTPException(status_code=code, detail=str(exc)) from exc
