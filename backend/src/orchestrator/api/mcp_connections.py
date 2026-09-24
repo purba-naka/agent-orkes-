@@ -10,10 +10,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from orchestrator.config import settings
-from orchestrator.db.models import McpConnection
+from orchestrator.db.models import McpConnection, McpToolSnapshot
 from orchestrator.db.session import get_db_session
 from orchestrator.tools.adapters import ToolInvocationError, ToolInvoker
 from orchestrator.tools.mcp_oauth import McpOAuthError, McpOAuthService
+from orchestrator.tools.mcp_snapshots import McpSnapshotService
 from orchestrator.tools.network import NetworkPolicyError
 
 router = APIRouter(prefix="/api/v1/mcp-connections", tags=["mcp-connections"])
@@ -23,6 +24,39 @@ class McpConnectionCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     server_url: str = Field(..., min_length=1, max_length=2048)
     scope: str | None = Field(default=None, max_length=1024)
+
+
+class McpRemoteTool(BaseModel):
+    name: str
+    title: str | None = None
+    description: str | None = None
+    input_schema: dict = Field(default_factory=lambda: {"type": "object"})
+    output_schema: dict | None = None
+
+
+class McpSnapshotTool(BaseModel):
+    name: str
+    title: str | None = None
+    description: str | None = None
+    input_schema: dict = Field(default_factory=lambda: {"type": "object"})
+    output_schema: dict | None = None
+    annotations: dict | None = None
+
+
+class McpSnapshotSummary(BaseModel):
+    id: uuid.UUID
+    tools_hash: str
+    tool_count: int
+    created_at: datetime
+
+
+class McpToolSnapshotResponse(BaseModel):
+    id: uuid.UUID
+    connection_id: uuid.UUID
+    tools_hash: str
+    tool_count: int
+    tools: list[McpSnapshotTool]
+    created_at: datetime
 
 
 class McpConnectionResponse(BaseModel):
@@ -36,14 +70,7 @@ class McpConnectionResponse(BaseModel):
     expires_at: datetime | None
     created_at: datetime
     updated_at: datetime
-
-
-class McpRemoteTool(BaseModel):
-    name: str
-    title: str | None = None
-    description: str | None = None
-    input_schema: dict = Field(default_factory=lambda: {"type": "object"})
-    output_schema: dict | None = None
+    latest_snapshot: McpSnapshotSummary | None = None
 
 
 class McpAuthorization(BaseModel):
@@ -96,7 +123,27 @@ async def list_connections(
     session: AsyncSession = Depends(get_db_session),
 ) -> list[McpConnectionResponse]:
     rows = await session.scalars(select(McpConnection).order_by(McpConnection.created_at.desc()))
-    return [McpConnectionResponse.model_validate(row) for row in rows]
+    connections = list(rows)
+    # Latest snapshot per connection (few connections; single pass in Python).
+    snapshots = await session.scalars(
+        select(McpToolSnapshot).order_by(McpToolSnapshot.created_at.desc())
+    )
+    latest_by_connection: dict[uuid.UUID, McpToolSnapshot] = {}
+    for snapshot in snapshots:
+        latest_by_connection.setdefault(snapshot.connection_id, snapshot)
+    responses = []
+    for row in connections:
+        response = McpConnectionResponse.model_validate(row)
+        snapshot = latest_by_connection.get(row.id)
+        if snapshot:
+            response.latest_snapshot = McpSnapshotSummary(
+                id=snapshot.id,
+                tools_hash=snapshot.tools_hash,
+                tool_count=len(snapshot.tools),
+                created_at=snapshot.created_at,
+            )
+        responses.append(response)
+    return responses
 
 
 @router.post("/{connection_id}/authorize", response_model=McpAuthorization)
@@ -143,6 +190,50 @@ async def list_remote_tools(
         )
         for tool in tools
     ]
+
+
+@router.get("/{connection_id}/snapshot", response_model=McpToolSnapshotResponse)
+async def get_latest_snapshot(
+    connection_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db_session),
+) -> McpToolSnapshotResponse:
+    connection = await session.get(McpConnection, connection_id)
+    if not connection:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    snapshot = await McpSnapshotService.latest(session, connection_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="No snapshot recorded for this connection")
+    return _snapshot_response(snapshot)
+
+
+@router.post("/{connection_id}/snapshot", response_model=McpToolSnapshotResponse)
+async def refresh_snapshot(
+    connection_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db_session),
+    service: McpOAuthService = Depends(_service),
+) -> McpToolSnapshotResponse:
+    """Fetch the live tools/list and freeze it. Failures keep the old snapshot."""
+    connection = await session.get(McpConnection, connection_id)
+    if not connection:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    snapshot_service = McpSnapshotService(service.network_policy, service.transport)
+    try:
+        snapshot = await snapshot_service.refresh(session, connection)
+    except (ToolInvocationError, NetworkPolicyError) as exc:
+        code = 409 if getattr(exc, "code", "") == "mcp_auth_required" else 502
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+    return _snapshot_response(snapshot)
+
+
+def _snapshot_response(snapshot: McpToolSnapshot) -> McpToolSnapshotResponse:
+    return McpToolSnapshotResponse(
+        id=snapshot.id,
+        connection_id=snapshot.connection_id,
+        tools_hash=snapshot.tools_hash,
+        tool_count=len(snapshot.tools),
+        tools=[McpSnapshotTool.model_validate(tool) for tool in snapshot.tools],
+        created_at=snapshot.created_at,
+    )
 
 
 @router.delete("/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)

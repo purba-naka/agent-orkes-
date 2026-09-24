@@ -84,6 +84,31 @@ class McpConnection(Base):
     )
 
 
+class McpToolSnapshot(Base):
+    """Immutable, content-addressed result of one server's tools/list call."""
+
+    __tablename__ = "mcp_tool_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_connections.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    tools_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    tools: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("connection_id", "tools_hash", name="uq_mcp_tool_snapshot_content"),
+    )
+
+
 class Model(Base):
     __tablename__ = "models"
 

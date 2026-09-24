@@ -30,6 +30,10 @@ class FakeProvider:
         self.refresh_ok = True
         self.token_forms: list[dict[str, str]] = []
         self.mcp_methods: list[str] = []
+        self.tools_pages: list[dict] = [
+            {"tools": [{"name": "search", "description": "Search pages", "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}}], "nextCursor": "p2"},
+            {"tools": [{"name": "fetch", "title": "Fetch"}]},
+        ]
 
     def _tokens(self) -> dict:
         self.issued += 1
@@ -60,10 +64,10 @@ class FakeProvider:
             if body["method"] == "notifications/initialized":
                 return httpx.Response(202)
             if body["method"] == "tools/list":
-                page = [
-                    {"tools": [{"name": "search", "description": "Search pages", "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}}], "nextCursor": "p2"},
-                    {"tools": [{"name": "fetch", "title": "Fetch"}]},
-                ][1 if body["params"].get("cursor") == "p2" else 0]
+                if body["params"].get("cursor") == "p2":
+                    page = self.tools_pages[1] if len(self.tools_pages) > 1 else {"tools": []}
+                else:
+                    page = self.tools_pages[0] if self.tools_pages else {"tools": []}
                 return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": page})
             assert request.headers["mcp-protocol-version"] == "2025-06-18"
             text = json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"structuredContent": {"pages": 3}}})
