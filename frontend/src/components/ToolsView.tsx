@@ -486,9 +486,6 @@ export function ToolsView() {
   const [tools, setTools] = useState<ToolItem[]>([])
   const [credentials, setCredentials] = useState<Credential[]>([])
   const [connections, setConnections] = useState<McpConnection[]>([])
-  const [connectionName, setConnectionName] = useState('')
-  const [connectionUrl, setConnectionUrl] = useState('')
-  const [oauthNotice, setOauthNotice] = useState<string | null>(null)
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
   const [models, setModels] = useState<ModelItem[]>([])
   const [form, setForm] = useState<ToolFormState>(emptyForm)
@@ -522,49 +519,8 @@ export function ToolsView() {
   }
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const result = params.get('mcp_oauth')
-    if (result) {
-      setOauthNotice(result === 'connected' ? 'MCP server connected.' : `MCP authorization failed: ${params.get('reason') || 'unknown error'}`)
-      window.history.replaceState(null, '', window.location.pathname)
-    }
     loadData()
   }, [])
-
-  async function handleConnect(event: React.FormEvent) {
-    event.preventDefault()
-    try {
-      setSubmitting(true)
-      setFormError(null)
-      const { authorization_url } = await api.createMcpConnection({
-        name: connectionName.trim(),
-        server_url: connectionUrl.trim(),
-      })
-      window.location.assign(authorization_url)
-    } catch (connectError) {
-      setFormError(connectError instanceof Error ? connectError.message : 'Failed to connect')
-      setSubmitting(false)
-    }
-  }
-
-  async function handleReauthorize(id: string) {
-    try {
-      const { authorization_url } = await api.authorizeMcpConnection(id)
-      window.location.assign(authorization_url)
-    } catch (authError) {
-      setFormError(authError instanceof Error ? authError.message : 'Failed to authorize')
-    }
-  }
-
-  async function handleDeleteConnection(id: string) {
-    if (!window.confirm('Remove this MCP connection? Tools using it will stop working.')) return
-    try {
-      await api.deleteMcpConnection(id)
-      await loadData()
-    } catch (deleteError) {
-      setFormError(deleteError instanceof Error ? deleteError.message : 'Failed to delete')
-    }
-  }
 
   async function handleCreate(event: React.FormEvent) {
     event.preventDefault()
@@ -618,47 +574,6 @@ export function ToolsView() {
 
         {error ? <div className="alert-box error"><p>{error}</p></div> : null}
         {formError ? <div className="alert-box error"><p>{formError}</p></div> : null}
-        {oauthNotice ? <div className="alert-box" role="status"><p>{oauthNotice}</p></div> : null}
-
-        <details className="create-tool-panel" open={connections.length === 0}>
-          <summary>MCP connections (OAuth)</summary>
-          {connections.length > 0 ? (
-            <div className="tool-list">
-              {connections.map((connection) => (
-                <article key={connection.id} className="tool-row">
-                  <div className="tool-row-main">
-                    <div className="tool-title-line">
-                      <h4>{connection.name}</h4>
-                      <span className={`risk-badge risk-${connection.status === 'connected' ? 'low' : 'high'}`}>{connection.status}</span>
-                    </div>
-                    <p>{connection.server_url}</p>
-                  </div>
-                  <div className="action-buttons">
-                    {connection.status !== 'connected' ? (
-                      <button type="button" className="btn small primary" onClick={() => handleReauthorize(connection.id)}>Authorize</button>
-                    ) : null}
-                    <button type="button" className="btn small" onClick={() => handleDeleteConnection(connection.id)}>Remove</button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          ) : null}
-          <form onSubmit={handleConnect} className="form-grid tool-form">
-            <div className="tool-form-columns">
-              <div className="form-row">
-                <label htmlFor="mcp-connection-name">Connection name</label>
-                <input id="mcp-connection-name" value={connectionName} onChange={(event) => setConnectionName(event.target.value)} placeholder="notion" required />
-              </div>
-              <div className="form-row">
-                <label htmlFor="mcp-connection-url">MCP server URL</label>
-                <input id="mcp-connection-url" type="url" value={connectionUrl} onChange={(event) => setConnectionUrl(event.target.value)} placeholder="https://mcp.notion.com/mcp" required />
-              </div>
-            </div>
-            <div className="action-buttons">
-              <button type="submit" className="btn primary" disabled={submitting}>Connect with OAuth</button>
-            </div>
-          </form>
-        </details>
 
         <details className="create-tool-panel" open={tools.length === 0}>
           <summary>Register new tool</summary>

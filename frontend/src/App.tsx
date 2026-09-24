@@ -8,6 +8,7 @@ import {
   MessageSquare,
   Moon,
   PanelLeft,
+  Plug,
   Plus,
   Sun,
   Wrench,
@@ -23,6 +24,7 @@ import { ConversationsView } from './components/ConversationsView'
 import { CredentialsView } from './components/CredentialsView'
 import { ModelsView } from './components/ModelsView'
 import { KnowledgeView } from './components/KnowledgeView'
+import { McpServersView } from './components/McpServersView'
 import { ToolsView } from './components/ToolsView'
 
 interface HealthState {
@@ -32,7 +34,7 @@ interface HealthState {
   loading: boolean
 }
 
-type Tab = 'conversations' | 'agents' | 'tools' | 'knowledge' | 'models' | 'credentials' | 'overview'
+type Tab = 'conversations' | 'agents' | 'tools' | 'mcp' | 'knowledge' | 'models' | 'credentials' | 'overview'
 
 interface NavItem {
   id: Tab
@@ -44,6 +46,7 @@ const PRIMARY_NAV: NavItem[] = [
   { id: 'conversations', label: 'Chat', icon: MessageSquare },
   { id: 'agents', label: 'Agents', icon: Bot },
   { id: 'tools', label: 'Tools', icon: Wrench },
+  { id: 'mcp', label: 'MCP', icon: Plug },
   { id: 'knowledge', label: 'Knowledge', icon: Library },
 ]
 
@@ -57,6 +60,7 @@ const TAB_TITLES: Record<Tab, { title: string; subtitle: string }> = {
   conversations: { title: 'Chat', subtitle: 'Run agents and monitor streaming responses' },
   agents: { title: 'Agents', subtitle: 'Create, configure, and orchestrate agent graphs' },
   tools: { title: 'Tools', subtitle: 'Catalog of tools available to agents' },
+  mcp: { title: 'MCP Servers', subtitle: 'Register remote MCP servers and browse their tools' },
   knowledge: { title: 'Knowledge', subtitle: 'Knowledge bases and documents' },
   models: { title: 'Models', subtitle: 'Model catalog and provider routing' },
   credentials: { title: 'Credentials', subtitle: 'Provider API keys and secrets' },
@@ -78,9 +82,9 @@ function getInitialEditorRailOpen(): boolean {
 }
 
 export function App() {
-  // Returning from an MCP OAuth callback lands on the tool catalog.
+  // Returning from an MCP OAuth callback lands on the MCP servers view.
   const [activeTab, setActiveTab] = useState<Tab>(() =>
-    new URLSearchParams(window.location.search).has('mcp_oauth') ? 'tools' : 'conversations'
+    new URLSearchParams(window.location.search).has('mcp_oauth') ? 'mcp' : 'conversations'
   )
   const [theme, setTheme] = useState<'light' | 'dark'>(getInitialTheme)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -336,6 +340,8 @@ export function App() {
             />
           ) : activeTab === 'tools' ? (
             <ToolsView />
+          ) : activeTab === 'mcp' ? (
+            <McpServersView />
           ) : activeTab === 'knowledge' ? (
             <KnowledgeView />
           ) : activeTab === 'models' ? (
