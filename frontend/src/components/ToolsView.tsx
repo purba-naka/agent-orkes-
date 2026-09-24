@@ -343,7 +343,7 @@ function ToolForm({
         ) : form.kind === 'mcp' ? (
           <div className="tool-form-columns">
             <div className="form-row">
-              <label htmlFor={`${submitLabel}-connection`}>OAuth connection</label>
+              <label htmlFor={`${submitLabel}-connection`}>MCP connection</label>
               <select
                 id={`${submitLabel}-connection`}
                 value={form.connectionId}
@@ -352,7 +352,7 @@ function ToolForm({
                   onChange({
                     ...form,
                     connectionId: event.target.value,
-                    serverUrl: connection ? connection.server_url : form.serverUrl,
+                    serverUrl: connection?.server_url || form.serverUrl,
                     credentialId: connection ? '' : form.credentialId,
                   })
                 }}

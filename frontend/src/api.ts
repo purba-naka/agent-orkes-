@@ -86,15 +86,40 @@ export interface ToolRevision {
   created_at: string
 }
 
+export type McpTransport = 'streamable_http' | 'sse' | 'stdio'
+export type McpAuthMode = 'oauth' | 'none'
+
+export interface McpSnapshotSummary {
+  id: string
+  tools_hash: string
+  tool_count: number
+  created_at: string
+}
+
 export interface McpConnection {
   id: string
   name: string
-  server_url: string
+  transport: McpTransport
+  auth: McpAuthMode
+  server_url: string | null
+  command: string | null
+  args: string[] | null
   status: 'pending' | 'connected' | 'needs_reauth'
   scope: string | null
   expires_at: string | null
   created_at: string
   updated_at: string
+  latest_snapshot?: McpSnapshotSummary | null
+}
+
+export interface McpConnectionCreate {
+  name: string
+  transport?: McpTransport
+  auth?: McpAuthMode
+  server_url?: string
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
 }
 
 export interface McpRemoteTool {
@@ -107,7 +132,7 @@ export interface McpRemoteTool {
 
 export interface McpAuthorization {
   connection: McpConnection
-  authorization_url: string
+  authorization_url: string | null
 }
 
 export interface ToolItem {
@@ -426,7 +451,7 @@ export const api = {
     return res.json()
   },
 
-  async createMcpConnection(data: { name: string; server_url: string }): Promise<McpAuthorization> {
+  async createMcpConnection(data: McpConnectionCreate): Promise<McpAuthorization> {
     const res = await fetch('/api/v1/mcp-connections', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
