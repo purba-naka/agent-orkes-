@@ -12,6 +12,7 @@ from orchestrator.db.models import ToolRevision
 from orchestrator.domain.catalog import CatalogService
 from orchestrator.retrieval.service import KnowledgeError, KnowledgeService
 from orchestrator.tools.mcp_oauth import McpOAuthError, McpOAuthService
+from orchestrator.tools.mcp_stdio import StdioMcpError, stdio_manager
 from orchestrator.tools.network import NetworkPolicy
 from orchestrator.tools.registry import CodeToolRegistry, code_tool_registry
 
@@ -325,6 +326,22 @@ class ToolInvoker:
         raise ToolInvocationError("mcp_protocol_error", "MCP tools/list did not terminate")
 
     async def _mcp_rpc(
+        self,
+        config: dict[str, Any],
+        headers: dict[str, str],
+        calls: list[tuple[str, dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        """Route an MCP session to the connection's transport."""
+        if str(config.get("transport", "streamable_http")) == "stdio":
+            try:
+                return await stdio_manager.call(
+                    config, calls, timeout=float(config.get("timeout_seconds", 30))
+                )
+            except StdioMcpError as exc:
+                raise ToolInvocationError(exc.code, str(exc)) from exc
+        return await self._mcp_rpc_streamable_http(config, headers, calls)
+
+    async def _mcp_rpc_streamable_http(
         self,
         config: dict[str, Any],
         headers: dict[str, str],

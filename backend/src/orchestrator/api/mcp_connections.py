@@ -17,6 +17,7 @@ from orchestrator.tools.adapters import ToolInvocationError, ToolInvoker
 from orchestrator.tools.mcp_config import connection_rpc_config, store_connection_env
 from orchestrator.tools.mcp_oauth import McpOAuthError, McpOAuthService
 from orchestrator.tools.mcp_snapshots import McpSnapshotService
+from orchestrator.tools.mcp_stdio import stdio_manager
 from orchestrator.tools.network import NetworkPolicyError
 
 router = APIRouter(prefix="/api/v1/mcp-connections", tags=["mcp-connections"])
@@ -124,10 +125,13 @@ async def create_connection(
     service: McpOAuthService = Depends(_service),
 ) -> McpAuthorization:
     origin = _browser_origin(request)
-    if payload.transport != "streamable_http":
+    if payload.transport == "sse":
         raise HTTPException(
-            status_code=422,
-            detail=f"Transport '{payload.transport}' is not supported yet",
+            status_code=422, detail="Transport 'sse' is not supported yet"
+        )
+    if payload.transport == "stdio" and payload.command not in settings.mcp_stdio_command_allowlist:
+        raise HTTPException(
+            status_code=403, detail="stdio command is not allowlisted"
         )
     try:
         if payload.auth == "none":
@@ -215,6 +219,8 @@ async def reauthorize_connection(
     connection = await session.get(McpConnection, connection_id)
     if not connection:
         raise HTTPException(status_code=404, detail="Connection not found")
+    if connection.auth != "oauth":
+        raise HTTPException(status_code=422, detail="Connection does not use OAuth")
     url = await service.reauthorize(session, connection)
     return McpAuthorization(
         connection=McpConnectionResponse.model_validate(connection), authorization_url=url
@@ -301,6 +307,8 @@ async def delete_connection(
     connection = await session.get(McpConnection, connection_id)
     if not connection:
         raise HTTPException(status_code=404, detail="Connection not found")
+    if connection.transport == "stdio":
+        stdio_manager.kill(str(connection.id))
     await session.delete(connection)
     await session.commit()
 

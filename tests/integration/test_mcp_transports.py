@@ -1,6 +1,7 @@
-"""MCP connections beyond OAuth: no-auth streamable HTTP (transports sse/stdio
-follow in later slices) — all registered through the same mcp-connections API."""
+"""MCP connections beyond OAuth: no-auth streamable HTTP and stdio (sse
+follows in a later slice) — all registered through the same mcp-connections API."""
 
+import sys
 import uuid
 
 import httpx
@@ -8,14 +9,52 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from orchestrator.api import mcp_connections
+from orchestrator.config import settings
 from orchestrator.db.models import McpConnection
 from orchestrator.main import app
 from orchestrator.tools.mcp_oauth import McpOAuthService
 from orchestrator.tools.network import NetworkPolicy
+from orchestrator.tools.mcp_stdio import stdio_manager
 
 from test_mcp_oauth import MCP_URL, FakeProvider, public
 
 FRONTEND = "http://127.0.0.1:5173"
+
+# A minimal line-delimited JSON-RPC MCP server, usable as:
+#   python -c STDIO_SERVER_SCRIPT
+STDIO_SERVER_SCRIPT = """
+import json, os, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    if 'id' not in msg:
+        continue
+    method = msg.get('method')
+    if method == 'initialize':
+        result = {'protocolVersion': '2025-03-26', 'capabilities': {}}
+    elif method == 'tools/list':
+        result = {'tools': [
+            {'name': 'echo', 'inputSchema': {'type': 'object'}},
+            {'name': 'env', 'inputSchema': {'type': 'object'}},
+        ]}
+    elif method == 'tools/call':
+        name = msg['params']['name']
+        if name == 'env':
+            text = json.dumps({'env': os.environ.get('STDIO_SECRET')})
+        else:
+            text = json.dumps({'echo': msg['params'].get('arguments', {}).get('value')})
+        result = {'content': [{'type': 'text', 'text': text}]}
+    else:
+        result = None
+    if result is None:
+        payload = {'jsonrpc': '2.0', 'id': msg['id'], 'error': {'code': -32601, 'message': 'unknown'}}
+    else:
+        payload = {'jsonrpc': '2.0', 'id': msg['id'], 'result': result}
+    sys.stdout.write(json.dumps(payload) + '\\n')
+    sys.stdout.flush()
+"""
 
 
 @pytest.fixture
@@ -86,6 +125,101 @@ async def test_no_auth_connection_rejects_oauth_server_401(open_provider) -> Non
         assert remote.status_code == 409
         assert "credentials" in remote.json()["detail"].lower()
         await client.delete(f"/api/v1/mcp-connections/{connection_id}")
+
+
+@pytest.mark.asyncio
+async def test_stdio_connection_end_to_end(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "mcp_stdio_command_allowlist", [sys.executable])
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/api/v1/mcp-connections",
+            headers={"origin": FRONTEND},
+            json={
+                "name": f"local-{uuid.uuid4().hex[:8]}",
+                "transport": "stdio",
+                "auth": "none",
+                "command": sys.executable,
+                "args": ["-c", STDIO_SERVER_SCRIPT],
+                "env": {"STDIO_SECRET": "s3cret"},
+            },
+        )
+        assert created.status_code == 201, created.text
+        body = created.json()
+        assert body["authorization_url"] is None
+        assert body["connection"]["status"] == "connected"
+        assert body["connection"]["transport"] == "stdio"
+        assert body["connection"]["server_url"] is None
+        # env values never echo back through the API
+        assert "s3cret" not in created.text and "s3cret" not in str(body)
+        connection_id = body["connection"]["id"]
+
+        remote = await client.get(f"/api/v1/mcp-connections/{connection_id}/tools")
+        assert remote.status_code == 200, remote.text
+        assert [t["name"] for t in remote.json()] == ["echo", "env"]
+
+        snapshot = await client.post(f"/api/v1/mcp-connections/{connection_id}/snapshot")
+        assert snapshot.status_code == 200, snapshot.text
+        assert [t["name"] for t in snapshot.json()["tools"]] == ["echo", "env"]
+
+        deleted = await client.delete(f"/api/v1/mcp-connections/{connection_id}")
+        assert deleted.status_code == 204
+    stdio_manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stdio_connection_invocation_passes_env(monkeypatch) -> None:
+    from orchestrator.db.session import async_session_factory
+    from orchestrator.tools.adapters import ToolInvoker
+    from orchestrator.tools.mcp_config import connection_rpc_config
+
+    monkeypatch.setattr(settings, "mcp_stdio_command_allowlist", [sys.executable])
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/api/v1/mcp-connections",
+            headers={"origin": FRONTEND},
+            json={
+                "name": f"local-{uuid.uuid4().hex[:8]}",
+                "transport": "stdio",
+                "auth": "none",
+                "command": sys.executable,
+                "args": ["-c", STDIO_SERVER_SCRIPT],
+                "env": {"STDIO_SECRET": "s3cret"},
+            },
+        )
+        assert created.status_code == 201, created.text
+        connection_id = created.json()["connection"]["id"]
+
+    try:
+        async with async_session_factory() as session:
+            connection = await session.get(McpConnection, uuid.UUID(connection_id))
+            invoker = ToolInvoker(session)
+            config = connection_rpc_config(connection)
+            assert await invoker.invoke_mcp_tool(config, "echo", {"value": "hi"}) == {
+                "echo": "hi"
+            }
+            assert await invoker.invoke_mcp_tool(config, "env", {}) == {"env": "s3cret"}
+    finally:
+        stdio_manager.shutdown()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            await client.delete(f"/api/v1/mcp-connections/{connection_id}")
+
+
+@pytest.mark.asyncio
+async def test_stdio_command_allowlist_gates_creation() -> None:
+    # Default allowlist is empty: the transport is disabled.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        denied = await client.post(
+            "/api/v1/mcp-connections",
+            headers={"origin": FRONTEND},
+            json={
+                "name": f"local-{uuid.uuid4().hex[:8]}",
+                "transport": "stdio",
+                "auth": "none",
+                "command": "definitely-not-allowlisted",
+            },
+        )
+        assert denied.status_code == 403
+        assert "allowlist" in denied.json()["detail"]
 
 
 @pytest.mark.asyncio

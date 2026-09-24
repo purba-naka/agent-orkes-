@@ -32,6 +32,9 @@ class Settings(BaseSettings):
         "http://localhost:5173",
     ]
     tool_local_allowlist: list[str] = []
+    # Executables a stdio MCP connection may spawn. Empty = stdio transport
+    # disabled: an exposed API must not allow arbitrary command execution.
+    mcp_stdio_command_allowlist: list[str] = []
 
     retrieval_embedding_dimensions: int = 64
     retrieval_max_document_bytes: int = 100_000
