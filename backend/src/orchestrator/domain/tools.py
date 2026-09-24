@@ -6,7 +6,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from orchestrator.db.models import Credential, KnowledgeBase, ModelRevision, Tool, ToolRevision
+from orchestrator.db.models import (
+    Credential,
+    KnowledgeBase,
+    McpConnection,
+    ModelRevision,
+    Tool,
+    ToolRevision,
+)
 from orchestrator.domain.tool_schemas import ToolCreate, ToolRevisionCreate
 from orchestrator.tools.registry import code_tool_registry
 
@@ -47,6 +54,24 @@ class ToolCatalogService:
             credential = await session.get(Credential, parsed)
             if not credential or not credential.is_enabled:
                 raise ToolConfigurationError("Credential reference is unavailable")
+        connection_ref = data.configuration.get("connection_id")
+        if connection_ref:
+            if data.kind != "mcp":
+                raise ToolConfigurationError("connection_id is only valid for MCP tools")
+            if any(str(h).lower() == "authorization" for h in references):
+                raise ToolConfigurationError(
+                    "Use either connection_id or an Authorization credential header, not both"
+                )
+            try:
+                connection = await session.get(McpConnection, uuid.UUID(str(connection_ref)))
+            except ValueError as exc:
+                raise ToolConfigurationError("MCP connection reference is invalid") from exc
+            if not connection:
+                raise ToolConfigurationError("MCP connection reference is unavailable")
+            if connection.server_url != data.configuration.get("server_url"):
+                raise ToolConfigurationError(
+                    "MCP tool server_url must match its connection's server_url"
+                )
 
     @staticmethod
     async def _validate_retrieval_configuration(

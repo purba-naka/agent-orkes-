@@ -11,11 +11,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from orchestrator.db.models import ToolRevision
 from orchestrator.domain.catalog import CatalogService
 from orchestrator.retrieval.service import KnowledgeError, KnowledgeService
+from orchestrator.tools.mcp_oauth import McpOAuthError, McpOAuthService
 from orchestrator.tools.network import NetworkPolicy
 from orchestrator.tools.registry import CodeToolRegistry, code_tool_registry
 
 _TEMPLATE_FIELD = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+
+def parse_jsonrpc_response(response: httpx.Response, request_id: int) -> dict[str, Any]:
+    """Streamable HTTP servers answer with plain JSON or an SSE stream."""
+    if not response.headers.get("content-type", "").startswith("text/event-stream"):
+        return response.json()
+    # ponytail: buffers the whole stream; fine for request/response tool calls.
+    for event in response.text.replace("\r\n", "\n").split("\n\n"):
+        data = "\n".join(
+            line[5:].removeprefix(" ") for line in event.split("\n") if line.startswith("data:")
+        )
+        if not data:
+            continue
+        message = json.loads(data)
+        if isinstance(message, dict) and message.get("id") == request_id:
+            return message
+    raise json.JSONDecodeError("No JSON-RPC response in event stream", response.text, 0)
 
 
 class ToolInvocationError(RuntimeError):
@@ -244,9 +262,69 @@ class ToolInvoker:
                 "tool_idempotency_required",
                 "A mutating retryable tool requires an idempotency header",
             )
+        payload = await self._mcp_rpc(
+            config,
+            headers,
+            [("tools/call", {"name": config["remote_tool_name"], "arguments": input_data})],
+        )
+        payload = payload[0]
+        if "error" in payload:
+            raise ToolInvocationError("mcp_tool_error", "Remote MCP tool returned an error")
+        result = payload.get("result", {})
+        if result.get("isError"):
+            raise ToolInvocationError("mcp_tool_error", "Remote MCP tool returned an error")
+        if "structuredContent" in result:
+            return result["structuredContent"]
+        content = result.get("content", [])
+        if len(content) == 1 and content[0].get("type") == "text":
+            text = content[0].get("text", "")
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return {"content": text}
+        return {"content": content}
+
+    async def list_mcp_tools(self, config: dict[str, Any]) -> list[dict[str, Any]]:
+        """All tools the server advertises, following `nextCursor` pagination."""
+        headers = await self._credential_headers(config)
+        tools: list[dict[str, Any]] = []
+        cursor: str | None = None
+        # ponytail: one MCP session per page; servers rarely paginate tool lists.
+        for _ in range(20):
+            params = {"cursor": cursor} if cursor else {}
+            payload = (await self._mcp_rpc(config, dict(headers), [("tools/list", params)]))[0]
+            if "error" in payload:
+                raise ToolInvocationError("mcp_protocol_error", "MCP tools/list failed")
+            result = payload.get("result", {})
+            tools.extend(t for t in result.get("tools", []) if isinstance(t, dict) and t.get("name"))
+            cursor = result.get("nextCursor")
+            if not cursor:
+                return tools
+        raise ToolInvocationError("mcp_protocol_error", "MCP tools/list did not terminate")
+
+    async def _mcp_rpc(
+        self,
+        config: dict[str, Any],
+        headers: dict[str, str],
+        calls: list[tuple[str, dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        """Open a Streamable HTTP session, then send each (method, params) in order."""
         headers.setdefault("Accept", "application/json, text/event-stream")
         server_url = str(config["server_url"])
         timeout = float(config.get("timeout_seconds", 30))
+        if config.get("connection_id"):
+            try:
+                token = await McpOAuthService(
+                    self.network_policy, self.transport
+                ).access_token(self.session, uuid.UUID(str(config["connection_id"])))
+            except (McpOAuthError, ValueError) as exc:
+                raise ToolInvocationError("mcp_auth_required", str(exc)) from exc
+            headers["Authorization"] = f"Bearer {token}"
+        redirect_options = {
+            "timeout": timeout,
+            "follow_redirects": bool(config.get("follow_redirects", False)),
+            "max_redirects": int(config.get("max_redirects", 5)),
+        }
 
         try:
             initialize = await self._send_json(
@@ -268,54 +346,47 @@ class ToolInvoker:
                         },
                     },
                 },
-                timeout=timeout,
-                follow_redirects=bool(config.get("follow_redirects", False)),
-                max_redirects=int(config.get("max_redirects", 5)),
+                **redirect_options,
             )
+            if initialize.status_code == 401:
+                raise ToolInvocationError(
+                    "mcp_auth_required", "MCP server rejected the credentials"
+                )
             initialize.raise_for_status()
+            init_payload = parse_jsonrpc_response(initialize, 1)
+            if "error" in init_payload:
+                raise ToolInvocationError("mcp_protocol_error", "MCP initialize failed")
             session_id = initialize.headers.get("mcp-session-id")
             call_headers = dict(headers)
             if session_id:
                 call_headers["Mcp-Session-Id"] = session_id
-            response = await self._send_json(
+            negotiated = init_payload.get("result", {}).get("protocolVersion")
+            if negotiated:
+                call_headers["MCP-Protocol-Version"] = str(negotiated)
+            initialized = await self._send_json(
                 method="POST",
                 url=server_url,
                 headers=call_headers,
-                body={
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {
-                        "name": config["remote_tool_name"],
-                        "arguments": input_data,
-                    },
-                },
-                timeout=timeout,
-                follow_redirects=bool(config.get("follow_redirects", False)),
-                max_redirects=int(config.get("max_redirects", 5)),
+                body={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                **redirect_options,
             )
-            response.raise_for_status()
-            payload = response.json()
+            initialized.raise_for_status()
+            payloads = []
+            for request_id, (method, params) in enumerate(calls, start=2):
+                response = await self._send_json(
+                    method="POST",
+                    url=server_url,
+                    headers=call_headers,
+                    body={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
+                    **redirect_options,
+                )
+                response.raise_for_status()
+                payloads.append(parse_jsonrpc_response(response, request_id))
+            return payloads
         except ToolInvocationError:
             raise
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             raise ToolInvocationError("tool_network_error", "MCP request failed") from exc
         except (httpx.HTTPStatusError, json.JSONDecodeError) as exc:
             raise ToolInvocationError("mcp_protocol_error", "MCP server returned an invalid response") from exc
-
-        if "error" in payload:
-            raise ToolInvocationError("mcp_tool_error", "Remote MCP tool returned an error")
-        result = payload.get("result", {})
-        if result.get("isError"):
-            raise ToolInvocationError("mcp_tool_error", "Remote MCP tool returned an error")
-        if "structuredContent" in result:
-            return result["structuredContent"]
-        content = result.get("content", [])
-        if len(content) == 1 and content[0].get("type") == "text":
-            text = content[0].get("text", "")
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                return {"content": text}
-        return {"content": content}
 

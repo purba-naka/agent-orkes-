@@ -78,7 +78,10 @@ function getInitialEditorRailOpen(): boolean {
 }
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<Tab>('conversations')
+  // Returning from an MCP OAuth callback lands on the tool catalog.
+  const [activeTab, setActiveTab] = useState<Tab>(() =>
+    new URLSearchParams(window.location.search).has('mcp_oauth') ? 'tools' : 'conversations'
+  )
   const [theme, setTheme] = useState<'light' | 'dark'>(getInitialTheme)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [editorRailOpen, setEditorRailOpen] = useState(getInitialEditorRailOpen)

@@ -195,5 +195,9 @@ async def test_mcp_streamable_http_initializes_and_calls_pinned_tool() -> None:
         {"question": "life"},
     )
     assert output == {"answer": 42}
-    assert [request["method"] for request in requests] == ["initialize", "tools/call"]
-    assert requests[1]["params"] == {"name": "answer", "arguments": {"question": "life"}}
+    assert [request["method"] for request in requests] == [
+        "initialize",
+        "notifications/initialized",
+        "tools/call",
+    ]
+    assert requests[2]["params"] == {"name": "answer", "arguments": {"question": "life"}}

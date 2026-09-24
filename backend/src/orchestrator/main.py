@@ -10,6 +10,7 @@ from orchestrator.api.conversations import router as conversations_router
 from orchestrator.api.credentials import router as credentials_router
 from orchestrator.api.models import router as models_router
 from orchestrator.api.knowledge import router as knowledge_router
+from orchestrator.api.mcp_connections import router as mcp_connections_router
 from orchestrator.api.runs import router as runs_router
 from orchestrator.api.tools import router as tools_router
 from orchestrator.config import settings
@@ -51,6 +52,7 @@ app.include_router(credentials_router)
 app.include_router(models_router)
 app.include_router(knowledge_router)
 app.include_router(tools_router)
+app.include_router(mcp_connections_router)
 app.include_router(agents_router)
 app.include_router(conversations_router)
 app.include_router(runs_router)

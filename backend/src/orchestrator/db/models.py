@@ -45,6 +45,45 @@ class Credential(Base):
     )
 
 
+class McpConnection(Base):
+    """OAuth 2.1 link to one remote MCP server. Tokens are AES-GCM encrypted."""
+
+    __tablename__ = "mcp_connections"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    server_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # pending -> connected; any refresh failure -> needs_reauth
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    authorization_endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    token_endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    client_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Registered with the client; OAuth requires the exact same value on every hop.
+    redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    # Frontend page the callback sends the browser back to.
+    return_url: Mapped[str] = mapped_column(Text, nullable=False)
+    scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Short-lived authorization state; cleared once the code is exchanged.
+    oauth_state: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    code_verifier: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    token_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    token_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'connected', 'needs_reauth')",
+            name="ck_mcp_connection_status",
+        ),
+    )
+
+
 class Model(Base):
     __tablename__ = "models"
 

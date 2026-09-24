@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     # 32 bytes base64-encoded AES-256 master key
     app_encryption_key: str
 
+
     cors_origins: list[str] = [
         "http://127.0.0.1:5173",
         "http://localhost:5173",

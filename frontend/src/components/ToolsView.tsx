@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react'
 import type {
   Credential,
   KnowledgeBase,
+  McpConnection,
+  McpRemoteTool,
   ModelItem,
   ToolItem,
   ToolKind,
@@ -28,6 +30,7 @@ type ToolFormState = {
   remoteToolName: string
   credentialId: string
   credentialHeader: string
+  connectionId: string
   timeoutSeconds: string
   idempotencyHeader: string
   headers: string
@@ -56,6 +59,7 @@ function emptyForm(): ToolFormState {
     remoteToolName: '',
     credentialId: '',
     credentialHeader: 'Authorization',
+    connectionId: '',
     timeoutSeconds: '30',
     idempotencyHeader: '',
     headers: '{}',
@@ -125,6 +129,7 @@ function configurationFromForm(form: ToolFormState): Record<string, unknown> {
   return {
     server_url: form.serverUrl.trim(),
     remote_tool_name: form.remoteToolName.trim(),
+    ...(form.connectionId ? { connection_id: form.connectionId } : {}),
     credential_headers: form.credentialId
       ? { [form.credentialHeader.trim() || 'Authorization']: form.credentialId }
       : {},
@@ -154,6 +159,7 @@ function formFromRevision(tool: ToolItem, revision: ToolRevision): ToolFormState
     remoteToolName: String(config.tool_name || config.remote_tool_name || ''),
     credentialId: String(Object.values((config.credential_headers as Record<string, unknown>) || {})[0] || ''),
     credentialHeader: String(Object.keys((config.credential_headers as Record<string, unknown>) || {})[0] || 'Authorization'),
+    connectionId: String(config.connection_id || ''),
     timeoutSeconds: String(config.timeout_seconds || 30),
     idempotencyHeader: String(config.idempotency_header || ''),
     headers: prettyJson((config.headers as Record<string, unknown>) || {}),
@@ -166,6 +172,7 @@ function formFromRevision(tool: ToolItem, revision: ToolRevision): ToolFormState
 interface ToolFormProps {
   form: ToolFormState
   credentials: Credential[]
+  connections: McpConnection[]
   knowledgeBases: KnowledgeBase[]
   models: ModelItem[]
   submitLabel: string
@@ -179,6 +186,7 @@ interface ToolFormProps {
 function ToolForm({
   form,
   credentials,
+  connections,
   knowledgeBases,
   models,
   submitLabel,
@@ -190,6 +198,32 @@ function ToolForm({
 }: ToolFormProps) {
   const set = <K extends keyof ToolFormState>(key: K, value: ToolFormState[K]) => {
     onChange({ ...form, [key]: value })
+  }
+  const [remoteTools, setRemoteTools] = useState<McpRemoteTool[]>([])
+  const [remoteError, setRemoteError] = useState<string | null>(null)
+  const selectedConnection = connections.find((c) => c.id === form.connectionId)
+
+  useEffect(() => {
+    setRemoteTools([])
+    setRemoteError(null)
+    if (form.kind !== 'mcp' || selectedConnection?.status !== 'connected') return
+    let cancelled = false
+    api.listMcpTools(selectedConnection.id)
+      .then((tools) => { if (!cancelled) setRemoteTools(tools) })
+      .catch((err) => { if (!cancelled) setRemoteError(err instanceof Error ? err.message : 'Failed to list tools') })
+    return () => { cancelled = true }
+  }, [form.kind, selectedConnection?.id, selectedConnection?.status])
+
+  function pickRemoteTool(name: string) {
+    const tool = remoteTools.find((t) => t.name === name)
+    if (!tool) return set('remoteToolName', name)
+    onChange({
+      ...form,
+      remoteToolName: tool.name,
+      description: form.description.trim() ? form.description : tool.description || tool.title || tool.name,
+      inputSchema: prettyJson(tool.input_schema),
+      outputSchema: tool.output_schema ? prettyJson(tool.output_schema) : form.outputSchema,
+    })
   }
 
   return (
@@ -309,12 +343,43 @@ function ToolForm({
         ) : form.kind === 'mcp' ? (
           <div className="tool-form-columns">
             <div className="form-row">
+              <label htmlFor={`${submitLabel}-connection`}>OAuth connection</label>
+              <select
+                id={`${submitLabel}-connection`}
+                value={form.connectionId}
+                onChange={(event) => {
+                  const connection = connections.find((c) => c.id === event.target.value)
+                  onChange({
+                    ...form,
+                    connectionId: event.target.value,
+                    serverUrl: connection ? connection.server_url : form.serverUrl,
+                    credentialId: connection ? '' : form.credentialId,
+                  })
+                }}
+              >
+                <option value="">None (static credential)</option>
+                {connections.map((connection) => (
+                  <option key={connection.id} value={connection.id}>{connection.name} ({connection.status})</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-row">
               <label htmlFor={`${submitLabel}-server-url`}>MCP server URL</label>
-              <input id={`${submitLabel}-server-url`} type="url" value={form.serverUrl} onChange={(event) => set('serverUrl', event.target.value)} placeholder="https://mcp.example.com/mcp" required />
+              <input id={`${submitLabel}-server-url`} type="url" value={form.serverUrl} onChange={(event) => set('serverUrl', event.target.value)} placeholder="https://mcp.example.com/mcp" required disabled={Boolean(form.connectionId)} />
             </div>
             <div className="form-row">
               <label htmlFor={`${submitLabel}-remote-name`}>Remote tool name</label>
-              <input id={`${submitLabel}-remote-name`} value={form.remoteToolName} onChange={(event) => set('remoteToolName', event.target.value)} placeholder="lookup_customer" required />
+              {remoteTools.length > 0 ? (
+                <select id={`${submitLabel}-remote-name`} value={form.remoteToolName} onChange={(event) => pickRemoteTool(event.target.value)} required>
+                  <option value="">Select a tool</option>
+                  {remoteTools.map((tool) => (
+                    <option key={tool.name} value={tool.name}>{tool.title ? `${tool.title} (${tool.name})` : tool.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input id={`${submitLabel}-remote-name`} value={form.remoteToolName} onChange={(event) => set('remoteToolName', event.target.value)} placeholder="lookup_customer" required />
+              )}
+              {remoteError ? <span className="hint">{remoteError}</span> : remoteTools.length > 0 ? <span className="hint">Picking a tool fills its description and schemas.</span> : null}
             </div>
           </div>
         ) : (
@@ -347,7 +412,7 @@ function ToolForm({
           <div className="tool-form-columns">
             <div className="form-row">
               <label htmlFor={`${submitLabel}-credential`}>Credential</label>
-              <select id={`${submitLabel}-credential`} value={form.credentialId} onChange={(event) => set('credentialId', event.target.value)}>
+              <select id={`${submitLabel}-credential`} value={form.credentialId} onChange={(event) => set('credentialId', event.target.value)} disabled={form.kind === 'mcp' && Boolean(form.connectionId)}>
                 <option value="">None</option>
                 {credentials.map((credential) => (
                   <option key={credential.id} value={credential.id}>{credential.name} (••••{credential.last_four})</option>
@@ -420,6 +485,10 @@ function createPayload(form: ToolFormState): ToolRevisionCreate {
 export function ToolsView() {
   const [tools, setTools] = useState<ToolItem[]>([])
   const [credentials, setCredentials] = useState<Credential[]>([])
+  const [connections, setConnections] = useState<McpConnection[]>([])
+  const [connectionName, setConnectionName] = useState('')
+  const [connectionUrl, setConnectionUrl] = useState('')
+  const [oauthNotice, setOauthNotice] = useState<string | null>(null)
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
   const [models, setModels] = useState<ModelItem[]>([])
   const [form, setForm] = useState<ToolFormState>(emptyForm)
@@ -432,14 +501,16 @@ export function ToolsView() {
 
   async function loadData() {
     try {
-      const [toolList, credentialList, knowledgeBaseList, modelList] = await Promise.all([
+      const [toolList, credentialList, connectionList, knowledgeBaseList, modelList] = await Promise.all([
         api.listTools(),
         api.listCredentials(),
+        api.listMcpConnections(),
         api.listKnowledgeBases(),
         api.listModels(),
       ])
       setTools(toolList)
       setCredentials(credentialList.filter((credential) => credential.is_enabled))
+      setConnections(connectionList)
       setKnowledgeBases(knowledgeBaseList)
       setModels(modelList)
       setError(null)
@@ -451,8 +522,49 @@ export function ToolsView() {
   }
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const result = params.get('mcp_oauth')
+    if (result) {
+      setOauthNotice(result === 'connected' ? 'MCP server connected.' : `MCP authorization failed: ${params.get('reason') || 'unknown error'}`)
+      window.history.replaceState(null, '', window.location.pathname)
+    }
     loadData()
   }, [])
+
+  async function handleConnect(event: React.FormEvent) {
+    event.preventDefault()
+    try {
+      setSubmitting(true)
+      setFormError(null)
+      const { authorization_url } = await api.createMcpConnection({
+        name: connectionName.trim(),
+        server_url: connectionUrl.trim(),
+      })
+      window.location.assign(authorization_url)
+    } catch (connectError) {
+      setFormError(connectError instanceof Error ? connectError.message : 'Failed to connect')
+      setSubmitting(false)
+    }
+  }
+
+  async function handleReauthorize(id: string) {
+    try {
+      const { authorization_url } = await api.authorizeMcpConnection(id)
+      window.location.assign(authorization_url)
+    } catch (authError) {
+      setFormError(authError instanceof Error ? authError.message : 'Failed to authorize')
+    }
+  }
+
+  async function handleDeleteConnection(id: string) {
+    if (!window.confirm('Remove this MCP connection? Tools using it will stop working.')) return
+    try {
+      await api.deleteMcpConnection(id)
+      await loadData()
+    } catch (deleteError) {
+      setFormError(deleteError instanceof Error ? deleteError.message : 'Failed to delete')
+    }
+  }
 
   async function handleCreate(event: React.FormEvent) {
     event.preventDefault()
@@ -506,10 +618,51 @@ export function ToolsView() {
 
         {error ? <div className="alert-box error"><p>{error}</p></div> : null}
         {formError ? <div className="alert-box error"><p>{formError}</p></div> : null}
+        {oauthNotice ? <div className="alert-box" role="status"><p>{oauthNotice}</p></div> : null}
+
+        <details className="create-tool-panel" open={connections.length === 0}>
+          <summary>MCP connections (OAuth)</summary>
+          {connections.length > 0 ? (
+            <div className="tool-list">
+              {connections.map((connection) => (
+                <article key={connection.id} className="tool-row">
+                  <div className="tool-row-main">
+                    <div className="tool-title-line">
+                      <h4>{connection.name}</h4>
+                      <span className={`risk-badge risk-${connection.status === 'connected' ? 'low' : 'high'}`}>{connection.status}</span>
+                    </div>
+                    <p>{connection.server_url}</p>
+                  </div>
+                  <div className="action-buttons">
+                    {connection.status !== 'connected' ? (
+                      <button type="button" className="btn small primary" onClick={() => handleReauthorize(connection.id)}>Authorize</button>
+                    ) : null}
+                    <button type="button" className="btn small" onClick={() => handleDeleteConnection(connection.id)}>Remove</button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : null}
+          <form onSubmit={handleConnect} className="form-grid tool-form">
+            <div className="tool-form-columns">
+              <div className="form-row">
+                <label htmlFor="mcp-connection-name">Connection name</label>
+                <input id="mcp-connection-name" value={connectionName} onChange={(event) => setConnectionName(event.target.value)} placeholder="notion" required />
+              </div>
+              <div className="form-row">
+                <label htmlFor="mcp-connection-url">MCP server URL</label>
+                <input id="mcp-connection-url" type="url" value={connectionUrl} onChange={(event) => setConnectionUrl(event.target.value)} placeholder="https://mcp.notion.com/mcp" required />
+              </div>
+            </div>
+            <div className="action-buttons">
+              <button type="submit" className="btn primary" disabled={submitting}>Connect with OAuth</button>
+            </div>
+          </form>
+        </details>
 
         <details className="create-tool-panel" open={tools.length === 0}>
           <summary>Register new tool</summary>
-          <ToolForm form={form} credentials={credentials} knowledgeBases={knowledgeBases} models={models} submitLabel="Register tool" submitting={submitting} onChange={setForm} onSubmit={handleCreate} showName />
+          <ToolForm form={form} credentials={credentials} connections={connections} knowledgeBases={knowledgeBases} models={models} submitLabel="Register tool" submitting={submitting} onChange={setForm} onSubmit={handleCreate} showName />
         </details>
 
         <div className="catalog-divider" />
@@ -560,6 +713,7 @@ export function ToolsView() {
             <ToolForm
               form={revisionForm}
               credentials={credentials}
+              connections={connections}
               knowledgeBases={knowledgeBases}
               models={models}
               submitLabel="Create revision"

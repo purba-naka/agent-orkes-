@@ -86,6 +86,30 @@ export interface ToolRevision {
   created_at: string
 }
 
+export interface McpConnection {
+  id: string
+  name: string
+  server_url: string
+  status: 'pending' | 'connected' | 'needs_reauth'
+  scope: string | null
+  expires_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface McpRemoteTool {
+  name: string
+  title: string | null
+  description: string | null
+  input_schema: Record<string, any>
+  output_schema: Record<string, any> | null
+}
+
+export interface McpAuthorization {
+  connection: McpConnection
+  authorization_url: string
+}
+
 export interface ToolItem {
   id: string
   name: string
@@ -394,6 +418,45 @@ export const api = {
       const err = await res.json().catch(() => ({}))
       throw new Error(err.detail || 'Failed to delete document')
     }
+  },
+
+  async listMcpConnections(): Promise<McpConnection[]> {
+    const res = await fetch('/api/v1/mcp-connections')
+    if (!res.ok) throw new Error('Failed to fetch MCP connections')
+    return res.json()
+  },
+
+  async createMcpConnection(data: { name: string; server_url: string }): Promise<McpAuthorization> {
+    const res = await fetch('/api/v1/mcp-connections', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail || 'Failed to create MCP connection')
+    }
+    return res.json()
+  },
+
+  async listMcpTools(id: string): Promise<McpRemoteTool[]> {
+    const res = await fetch(`/api/v1/mcp-connections/${id}/tools`)
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail || 'Failed to list MCP tools')
+    }
+    return res.json()
+  },
+
+  async authorizeMcpConnection(id: string): Promise<McpAuthorization> {
+    const res = await fetch(`/api/v1/mcp-connections/${id}/authorize`, { method: 'POST' })
+    if (!res.ok) throw new Error('Failed to start MCP authorization')
+    return res.json()
+  },
+
+  async deleteMcpConnection(id: string): Promise<void> {
+    const res = await fetch(`/api/v1/mcp-connections/${id}`, { method: 'DELETE' })
+    if (!res.ok) throw new Error('Failed to delete MCP connection')
   },
 
   async listTools(): Promise<ToolItem[]> {
