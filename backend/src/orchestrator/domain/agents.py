@@ -21,6 +21,7 @@ from orchestrator.domain.validation import (
     validate_draft_document,
     validate_publish_document,
 )
+from orchestrator.tools.mcp_snapshots import freeze_mcp_bindings
 
 
 class DraftConflictError(Exception):
@@ -124,13 +125,19 @@ class AgentService:
         if not draft:
             raise ValueError(f"Draft for agent {agent_id} not found")
 
+        snapshot_pins: dict[str, str] = {}
         is_valid, diagnostics, manifest = await validate_publish_document(
-            session, draft.document, owner_agent_id=agent_id
+            session, draft.document, owner_agent_id=agent_id, snapshot_pins=snapshot_pins
         )
         if not is_valid:
             raise PublishValidationError(diagnostics)
 
-        content_hash = compute_content_hash(draft.document)
+        # Freeze MCP bindings to snapshot ids and hash the resolved document so
+        # identical drafts + identical listings stay idempotent.
+        resolved_document = await freeze_mcp_bindings(
+            session, draft.document, snapshot_pins
+        )
+        content_hash = compute_content_hash(resolved_document)
 
         # Idempotency check: if identical content hash exists for this agent, reuse it
         stmt = select(AgentRevision).where(
@@ -155,14 +162,14 @@ class AgentService:
             id=rev_id,
             agent_id=agent_id,
             revision_number=new_rev_number,
-            document=draft.document,
+            document=resolved_document,
             dependency_manifest=manifest,
             content_hash=content_hash,
         )
         session.add(revision)
 
         # Persist every pinned revision dependency represented by a UUID.
-        for kind in ("agent", "model", "tool"):
+        for kind in ("agent", "model", "tool", "mcp_server", "mcp_snapshot"):
             manifest_key = f"{kind}s"
             for dependency_id in manifest.get(manifest_key, []):
                 session.add(

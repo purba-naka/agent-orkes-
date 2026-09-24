@@ -4,8 +4,15 @@ from typing import Any
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from orchestrator.db.models import AgentRevision, KnowledgeBase, ModelRevision, ToolRevision
+from orchestrator.db.models import (
+    AgentRevision,
+    KnowledgeBase,
+    McpConnection,
+    ModelRevision,
+    ToolRevision,
+)
 from orchestrator.domain.agent_schemas import Diagnostic
+from orchestrator.tools.mcp_snapshots import McpSnapshotService
 from orchestrator.tools.registry import code_tool_registry
 
 NODE_ID_REGEX = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -135,6 +142,87 @@ def _validate_policies(
         always_include = selection.get("always_include", [])
         if not isinstance(always_include, list) or not all(isinstance(name, str) and name for name in always_include):
             diagnostics.append(_policy_error(f"{middleware_path}/tool_selection/always_include", "policy.invalid_tool_selection", "always_include must be a list of non-empty tool names"))
+    return diagnostics
+
+
+def _validate_mcp_bindings(agent_cfg: dict[str, Any], path: str) -> list[Diagnostic]:
+    """Shape-check agent MCP bindings. Drafts pin connections, never snapshots."""
+    diagnostics: list[Diagnostic] = []
+    bindings = agent_cfg.get("mcp_bindings", [])
+    base = f"{path}/mcp_bindings"
+    if not isinstance(bindings, list):
+        return [
+            Diagnostic(
+                code="node.invalid_mcp_bindings",
+                path=base,
+                message="mcp_bindings must be a list",
+                severity="error",
+            )
+        ]
+    for idx, binding in enumerate(bindings):
+        binding_path = f"{base}/{idx}"
+        if not isinstance(binding, dict):
+            diagnostics.append(
+                Diagnostic(
+                    code="node.invalid_mcp_binding",
+                    path=binding_path,
+                    message="MCP binding must be a JSON object",
+                    severity="error",
+                )
+            )
+            continue
+        if "snapshot_id" in binding:
+            diagnostics.append(
+                Diagnostic(
+                    code="node.mcp_binding_snapshot_in_draft",
+                    path=f"{binding_path}/snapshot_id",
+                    message="Drafts bind a connection, not a snapshot; snapshot_id is frozen at publish time",
+                    severity="error",
+                )
+            )
+        try:
+            uuid.UUID(str(binding.get("connection_id")))
+        except (TypeError, ValueError, AttributeError):
+            diagnostics.append(
+                Diagnostic(
+                    code="node.invalid_mcp_connection_uuid",
+                    path=f"{binding_path}/connection_id",
+                    message="MCP binding connection_id must be a UUID",
+                    severity="error",
+                )
+            )
+        tools = binding.get("tools")
+        if not isinstance(tools, list) or not tools:
+            diagnostics.append(
+                Diagnostic(
+                    code="node.invalid_mcp_binding_tools",
+                    path=f"{binding_path}/tools",
+                    message="MCP binding tools must be a non-empty list",
+                    severity="error",
+                )
+            )
+            continue
+        for tool_idx, tool in enumerate(tools):
+            tool_path = f"{binding_path}/tools/{tool_idx}"
+            if not isinstance(tool, dict) or not isinstance(tool.get("name"), str) or not tool["name"].strip():
+                diagnostics.append(
+                    Diagnostic(
+                        code="node.invalid_mcp_tool_name",
+                        path=f"{tool_path}/name",
+                        message="Bound MCP tool name must be a non-empty string",
+                        severity="error",
+                    )
+                )
+            approval = tool.get("approval", "never")
+            if approval not in ("always", "never"):
+                diagnostics.append(
+                    Diagnostic(
+                        code="node.invalid_mcp_tool_approval",
+                        path=f"{tool_path}/approval",
+                        message="Bound MCP tool approval must be 'always' or 'never'",
+                        severity="error",
+                    )
+                )
     return diagnostics
 
 
@@ -300,7 +388,10 @@ def validate_draft_document(doc: dict[str, Any]) -> list[Diagnostic]:
                         try:
                             uuid.UUID(str(tool_revision_id))
                         except (TypeError, ValueError, AttributeError):
-                            diagnostics.append(Diagnostic(code="node.invalid_tool_revision_uuid", path=f"/nodes/{idx}/agent/tool_revision_ids/{tool_idx}", message="tool_revision_id must be an immutable revision UUID", severity="error"))
+                            diagnostics.append(Diagnostic(code="node.invalid_tool_revision_uuid", path=f"{path}/agent/tool_revision_ids/{tool_idx}", message="tool_revision_id must be an immutable revision UUID", severity="error"))
+                    diagnostics.extend(
+                        _validate_mcp_bindings(agent_cfg, f"/nodes/{idx}/agent")
+                    )
                     m_rev = agent_cfg.get("model_revision_id")
                     if not m_rev:
                         diagnostics.append(
@@ -734,7 +825,7 @@ async def _resolve_referenced_dependencies(
 
     manifests["agents"].add(str(revision.id))
     child_manifest = revision.dependency_manifest or {}
-    for kind in ("models", "tools", "agents"):
+    for kind in ("models", "tools", "agents", "mcp_servers", "mcp_snapshots"):
         manifests[kind].update(str(value) for value in child_manifest.get(kind, []))
     for code_tool in child_manifest.get("code_tools", []):
         manifests["code_tools"].add(json.dumps(code_tool, sort_keys=True))
@@ -775,6 +866,7 @@ async def validate_publish_document(
     session: AsyncSession,
     doc: dict[str, Any],
     owner_agent_id: uuid.UUID | None = None,
+    snapshot_pins: dict[str, str] | None = None,
 ) -> tuple[bool, list[Diagnostic], dict[str, Any]]:
     diagnostics = validate_draft_document(doc)
     has_errors = any(d.severity == "error" for d in diagnostics)
@@ -810,6 +902,8 @@ async def validate_publish_document(
         "tools": set(),
         "agents": set(),
         "code_tools": set(),
+        "mcp_servers": set(),
+        "mcp_snapshots": set(),
     }
     for idx, node in enumerate(nodes):
         n_id = node.get("id")
@@ -891,6 +985,67 @@ async def validate_publish_document(
                         diagnostics.append(Diagnostic(code="publish.tool_revision_unavailable", path=tool_path, message=f"Tool revision {agent_tool_id} does not exist or is disabled", severity="error"))
                         continue
                     manifests["tools"].add(str(agent_tool.id))
+
+                for b_idx, binding in enumerate(agent_cfg.get("mcp_bindings", [])):
+                    binding_path = f"/nodes/{idx}/agent/mcp_bindings/{b_idx}"
+                    if not isinstance(binding, dict):
+                        continue
+                    try:
+                        connection_id = uuid.UUID(str(binding.get("connection_id")))
+                    except (TypeError, ValueError, AttributeError):
+                        continue
+                    connection = await session.get(McpConnection, connection_id)
+                    if not connection:
+                        diagnostics.append(
+                            Diagnostic(
+                                code="publish.mcp_connection_unavailable",
+                                path=binding_path,
+                                message=f"MCP connection {connection_id} does not exist",
+                                severity="error",
+                            )
+                        )
+                        continue
+                    if connection.status != "connected":
+                        diagnostics.append(
+                            Diagnostic(
+                                code="publish.mcp_connection_not_connected",
+                                path=binding_path,
+                                message=f"MCP connection '{connection.name}' is not connected (status: {connection.status})",
+                                severity="error",
+                            )
+                        )
+                        continue
+                    snapshot = await McpSnapshotService.latest(session, connection_id)
+                    if not snapshot:
+                        diagnostics.append(
+                            Diagnostic(
+                                code="publish.mcp_snapshot_missing",
+                                path=binding_path,
+                                message=f"MCP connection '{connection.name}' has no tool snapshot; refresh it before publishing",
+                                severity="error",
+                            )
+                        )
+                        continue
+                    manifests["mcp_servers"].add(str(connection.id))
+                    manifests["mcp_snapshots"].add(str(snapshot.id))
+                    if snapshot_pins is not None:
+                        snapshot_pins[str(connection.id)] = str(snapshot.id)
+                    snapshot_names = {
+                        tool.get("name") for tool in snapshot.tools if isinstance(tool, dict)
+                    }
+                    for t_idx, bound_tool in enumerate(binding.get("tools", [])):
+                        if not isinstance(bound_tool, dict):
+                            continue
+                        name = bound_tool.get("name")
+                        if name not in snapshot_names:
+                            diagnostics.append(
+                                Diagnostic(
+                                    code="publish.mcp_tool_not_in_snapshot",
+                                    path=f"{binding_path}/tools/{t_idx}/name",
+                                    message=f"MCP tool '{name}' is not in the current snapshot of '{connection.name}'",
+                                    severity="error",
+                                )
+                            )
 
                 system_prompt = (
                     agent_cfg.get("system_prompt")
@@ -1132,6 +1287,8 @@ async def validate_publish_document(
             "tools": sorted(manifests["tools"]),
             "agents": sorted(manifests["agents"]),
             "code_tools": [json.loads(value) for value in sorted(manifests["code_tools"])],
+            "mcp_servers": sorted(manifests["mcp_servers"]),
+            "mcp_snapshots": sorted(manifests["mcp_snapshots"]),
         }
         return True, diagnostics, dependency_manifest
 
@@ -1460,5 +1617,7 @@ async def validate_publish_document(
         "tools": sorted(manifests["tools"]),
         "agents": sorted(manifests["agents"]),
         "code_tools": [json.loads(value) for value in sorted(manifests["code_tools"])],
+        "mcp_servers": sorted(manifests["mcp_servers"]),
+        "mcp_snapshots": sorted(manifests["mcp_snapshots"]),
     }
     return True, diagnostics, dependency_manifest

@@ -15,7 +15,12 @@ from orchestrator.config import settings
 from orchestrator.db.models import AgentRevision, ModelRevision, ToolRevision
 from orchestrator.db.session import async_session_factory
 from orchestrator.domain.catalog import CatalogService
-from orchestrator.runtime.policy import build_agent_middleware, resolve_agent_tools
+from orchestrator.runtime.policy import (
+    build_agent_middleware,
+    build_tool_approval_interrupts,
+    resolve_agent_tools,
+    resolve_mcp_bound_tools,
+)
 from orchestrator.runtime.state import RuntimeState
 from orchestrator.tools.adapters import ToolInvoker, ToolInvocationError
 from orchestrator.tools.network import NetworkPolicy
@@ -69,16 +74,15 @@ async def build_agent_harness(
     tools, tool_revisions = await resolve_agent_tools(
         session, agent_cfg.get("tool_revision_ids", [])
     )
-    approval_policy = middleware_policy.get("tool_approval", {})
-    risky_only = bool(approval_policy.get("risky_only", False))
-    approval_risks = {"medium", "high"} if risky_only else set(
-        approval_policy.get("risk_levels", [])
+    bound_tools, bound_mcp_info = await resolve_mcp_bound_tools(
+        session,
+        agent_cfg.get("mcp_bindings", []),
+        reserved_names={tool.name for tool in tools},
     )
-    interrupt_on = {
-        name: {"allowed_decisions": ["approve", "edit", "reject"]}
-        for name, tool_revision in tool_revisions.items()
-        if tool_revision.risk_level in approval_risks
-    }
+    tools = [*tools, *bound_tools]
+    interrupt_on = build_tool_approval_interrupts(
+        tool_revisions, bound_mcp_info, middleware_policy
+    )
     middleware = build_agent_middleware(
         system_prompt=system_prompt,
         context_policy=context_policy,

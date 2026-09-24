@@ -9,7 +9,17 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from orchestrator.db.models import AgentRevision, Run, RunInterrupt, Tool, ToolRevision, utcnow
+from orchestrator.db.models import (
+    AgentRevision,
+    McpConnection,
+    McpToolSnapshot,
+    Run,
+    RunInterrupt,
+    Tool,
+    ToolRevision,
+    utcnow,
+)
+from orchestrator.tools.mcp_snapshots import mcp_bound_tool_name
 
 
 class InterruptDecisionError(ValueError):
@@ -76,6 +86,51 @@ def _find_node(revision: AgentRevision, node_id: str) -> dict[str, Any] | None:
     )
 
 
+async def _pinned_input_schema(
+    session: AsyncSession, revision: AgentRevision, tool_name: str
+) -> dict[str, Any] | None:
+    """Resolve the pinned input schema for a runtime tool name.
+
+    Native tools resolve through tool_revision_ids; MCP-bound tools resolve
+    through the frozen snapshot pinned in each binding.
+    """
+    revision_ids = {
+        uuid.UUID(str(raw_id))
+        for node in revision.document.get("nodes", [])
+        if node.get("kind") == "agent" and node.get("agent", {}).get("mode") == "inline"
+        for raw_id in node.get("agent", {}).get("tool_revision_ids", [])
+    }
+    if revision_ids:
+        rows = await session.execute(
+            select(ToolRevision, Tool.name)
+            .join(Tool, Tool.id == ToolRevision.tool_id)
+            .where(ToolRevision.id.in_(revision_ids))
+        )
+        for tool_revision, catalog_name in rows.all():
+            if _runtime_tool_name(catalog_name, tool_revision.id) == tool_name:
+                return tool_revision.input_schema
+
+    for node in revision.document.get("nodes", []):
+        agent_cfg = node.get("agent", {}) if isinstance(node, dict) else {}
+        for binding in agent_cfg.get("mcp_bindings", []) or []:
+            if not isinstance(binding, dict) or not binding.get("snapshot_id"):
+                continue
+            snapshot = await session.get(
+                McpToolSnapshot, uuid.UUID(str(binding["snapshot_id"]))
+            )
+            connection = await session.get(
+                McpConnection, uuid.UUID(str(binding["connection_id"]))
+            )
+            if not snapshot or not connection:
+                continue
+            for entry in snapshot.tools:
+                if not isinstance(entry, dict) or not entry.get("name"):
+                    continue
+                if mcp_bound_tool_name(connection.name, entry["name"]) == tool_name:
+                    return entry["input_schema"]
+    return None
+
+
 async def build_resume_value(
     session: AsyncSession,
     revision: AgentRevision,
@@ -123,28 +178,10 @@ async def build_resume_value(
         edited_input = decision.get("input")
         if not isinstance(edited_input, dict):
             raise InterruptDecisionError("invalid_interrupt_decision", "Edited input is required")
-        revision_ids = {
-            uuid.UUID(str(raw_id))
-            for node in revision.document.get("nodes", [])
-            if node.get("kind") == "agent" and node.get("agent", {}).get("mode") == "inline"
-            for raw_id in node.get("agent", {}).get("tool_revision_ids", [])
-        }
-        rows = await session.execute(
-            select(ToolRevision, Tool.name)
-            .join(Tool, Tool.id == ToolRevision.tool_id)
-            .where(ToolRevision.id.in_(revision_ids))
-        )
-        pinned = next(
-            (
-                tool_revision
-                for tool_revision, catalog_name in rows.all()
-                if _runtime_tool_name(catalog_name, tool_revision.id) == tool_name
-            ),
-            None,
-        )
-        if not pinned:
+        pinned_schema = await _pinned_input_schema(session, revision, tool_name)
+        if pinned_schema is None:
             raise InterruptDecisionError("invalid_interrupt_decision", "Tool is not pinned")
-        _validate_schema(pinned.input_schema, edited_input, "input")
+        _validate_schema(pinned_schema, edited_input, "input")
         native["edited_action"] = {"name": tool_name, "args": edited_input}
     elif action == "reject":
         native["message"] = decision.get("reason") or "Tool call rejected"

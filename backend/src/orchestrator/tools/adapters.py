@@ -244,6 +244,43 @@ class ToolInvoker:
         except (httpx.HTTPStatusError, json.JSONDecodeError) as exc:
             raise ToolInvocationError("tool_http_error", "Tool returned an invalid HTTP response") from exc
 
+    async def invoke_mcp_tool(
+        self,
+        config: dict[str, Any],
+        remote_tool_name: str,
+        input_data: dict[str, Any],
+    ) -> Any:
+        """Call a remote tool on a connected MCP server by name.
+
+        Used by agent bindings pinned to a snapshot: the schema is validated
+        by the caller against the snapshot entry, this only performs the call.
+        """
+        headers = await self._credential_headers(config)
+        payload = await self._mcp_rpc(
+            config,
+            headers,
+            [("tools/call", {"name": remote_tool_name, "arguments": input_data})],
+        )
+        return self._mcp_call_result(payload[0])
+
+    @staticmethod
+    def _mcp_call_result(payload: dict[str, Any]) -> Any:
+        if "error" in payload:
+            raise ToolInvocationError("mcp_tool_error", "Remote MCP tool returned an error")
+        result = payload.get("result", {})
+        if result.get("isError"):
+            raise ToolInvocationError("mcp_tool_error", "Remote MCP tool returned an error")
+        if "structuredContent" in result:
+            return result["structuredContent"]
+        content = result.get("content", [])
+        if len(content) == 1 and content[0].get("type") == "text":
+            text = content[0].get("text", "")
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return {"content": text}
+        return {"content": content}
+
     async def _invoke_mcp(
         self,
         revision: ToolRevision,
@@ -267,22 +304,7 @@ class ToolInvoker:
             headers,
             [("tools/call", {"name": config["remote_tool_name"], "arguments": input_data})],
         )
-        payload = payload[0]
-        if "error" in payload:
-            raise ToolInvocationError("mcp_tool_error", "Remote MCP tool returned an error")
-        result = payload.get("result", {})
-        if result.get("isError"):
-            raise ToolInvocationError("mcp_tool_error", "Remote MCP tool returned an error")
-        if "structuredContent" in result:
-            return result["structuredContent"]
-        content = result.get("content", [])
-        if len(content) == 1 and content[0].get("type") == "text":
-            text = content[0].get("text", "")
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                return {"content": text}
-        return {"content": content}
+        return self._mcp_call_result(payload[0])
 
     async def list_mcp_tools(self, config: dict[str, Any]) -> list[dict[str, Any]]:
         """All tools the server advertises, following `nextCursor` pagination."""

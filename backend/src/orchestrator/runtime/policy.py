@@ -27,9 +27,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from orchestrator.config import settings
-from orchestrator.db.models import ModelRevision, Tool, ToolRevision
+from orchestrator.db.models import McpConnection, McpToolSnapshot, ModelRevision, Tool, ToolRevision
 from orchestrator.db.session import async_session_factory
-from orchestrator.tools.adapters import ToolInvoker, ToolInvocationError
+from orchestrator.tools.adapters import (
+    ToolInvocationError,
+    ToolInvoker,
+    validate_schema,
+)
+from orchestrator.tools.mcp_snapshots import mcp_bound_tool_name
 from orchestrator.tools.network import NetworkPolicy
 
 DEFAULT_CONTEXT_MAX_CHARS = 12_000
@@ -309,6 +314,131 @@ def _json_schema_model(name: str, schema: dict[str, Any]) -> type:
 def _safe_tool_name(name: str, revision_id: uuid.UUID) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9_-]", "_", name).strip("_")
     return (normalized or f"tool_{revision_id.hex[:8]}")[:64]
+
+
+def build_tool_approval_interrupts(
+    tool_revisions: dict[str, ToolRevision],
+    bound_mcp_tools: dict[str, dict[str, Any]],
+    middleware_policy: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Native tools interrupt by risk level; bound MCP tools by explicit approval."""
+    approval_policy = middleware_policy.get("tool_approval", {})
+    risky_only = bool(approval_policy.get("risky_only", False))
+    approval_risks = {"medium", "high"} if risky_only else set(
+        approval_policy.get("risk_levels", [])
+    )
+    interrupts = {
+        name: {"allowed_decisions": ["approve", "edit", "reject"]}
+        for name, tool_revision in tool_revisions.items()
+        if tool_revision.risk_level in approval_risks
+    }
+    for name, info in bound_mcp_tools.items():
+        if info.get("approval") == "always":
+            interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject"]}
+    return interrupts
+
+
+async def resolve_mcp_bound_tools(
+    session: AsyncSession,
+    bindings: Sequence[dict[str, Any]],
+    *,
+    reserved_names: set[str] | None = None,
+    network_policy: NetworkPolicy | None = None,
+    transport: Any | None = None,
+) -> tuple[list[BaseTool], dict[str, dict[str, Any]]]:
+    """Build tools for allowlisted entries pinned to frozen snapshots.
+
+    The binding comes from a published revision document, so every entry must
+    exist in the pinned snapshot: a drifted server listing never silently
+    changes what a published agent can call.
+    """
+    tools: list[BaseTool] = []
+    bound_info: dict[str, dict[str, Any]] = {}
+    taken: set[str] = set(reserved_names or set())
+    for binding in bindings:
+        if not isinstance(binding, dict) or not binding.get("snapshot_id"):
+            continue
+        connection = await session.get(
+            McpConnection, uuid.UUID(str(binding["connection_id"]))
+        )
+        if not connection or connection.status != "connected":
+            raise ValueError(
+                f"MCP connection {binding.get('connection_id')} is not connected"
+            )
+        snapshot = await session.get(
+            McpToolSnapshot, uuid.UUID(str(binding["snapshot_id"]))
+        )
+        if not snapshot or str(snapshot.connection_id) != str(connection.id):
+            raise ValueError(
+                f"MCP snapshot {binding.get('snapshot_id')} is unavailable"
+            )
+        entries = {
+            tool["name"]: tool
+            for tool in snapshot.tools
+            if isinstance(tool, dict) and tool.get("name")
+        }
+        config = {
+            "server_url": connection.server_url,
+            "connection_id": str(connection.id),
+        }
+        for bound in binding.get("tools", []):
+            if not isinstance(bound, dict):
+                continue
+            entry = entries.get(bound.get("name"))
+            if not entry:
+                raise ValueError(
+                    f"MCP tool '{bound.get('name')}' is not in the pinned snapshot"
+                )
+            tool_name = mcp_bound_tool_name(connection.name, entry["name"])
+            if tool_name in taken:
+                raise ValueError(f"MCP tool name collision: {tool_name}")
+            taken.add(tool_name)
+
+            async def invoke_bound_tool(
+                _config: dict[str, Any] = config,
+                _remote_name: str = entry["name"],
+                _input_schema: dict[str, Any] = entry["input_schema"],
+                _output_schema: dict[str, Any] | None = entry.get("output_schema"),
+                **kwargs: Any,
+            ) -> Any:
+                validate_schema(_input_schema, kwargs, "tool_input_invalid")
+                async with async_session_factory() as tool_session:
+                    current = await tool_session.get(
+                        McpConnection, uuid.UUID(_config["connection_id"])
+                    )
+                    if not current or current.status != "connected":
+                        raise ToolInvocationError(
+                            "mcp_auth_required", "MCP server is not connected"
+                        )
+                    invoker = ToolInvoker(
+                        tool_session,
+                        network_policy=network_policy,
+                        transport=transport,
+                    )
+                    result = await invoker.invoke_mcp_tool(
+                        _config, _remote_name, kwargs
+                    )
+                if _output_schema:
+                    validate_schema(_output_schema, result, "tool_output_invalid")
+                return result
+
+            tools.append(
+                StructuredTool.from_function(
+                    coroutine=invoke_bound_tool,
+                    name=tool_name,
+                    description=entry.get("description") or tool_name,
+                    args_schema=_json_schema_model(
+                        f"McpToolInput_{len(tools)}_{snapshot.id.hex[:8]}",
+                        entry["input_schema"],
+                    ),
+                )
+            )
+            bound_info[tool_name] = {
+                "approval": bound.get("approval", "never"),
+                "input_schema": entry["input_schema"],
+                "output_schema": entry.get("output_schema"),
+            }
+    return tools, bound_info
 
 
 async def resolve_agent_tools(
